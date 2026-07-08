@@ -13,6 +13,9 @@ public class Waypoint : MonoBehaviour
     [Tooltip("Possible waypoints a car may go to after reaching this one.")]
     public List<Waypoint> nextWaypoints = new List<Waypoint>();
 
+    [Tooltip("Adjacent waypoints in parallel lanes. CarAI may retarget to one of these when overtaking a slower car.")]
+    public List<Waypoint> laneNeighbors = new List<Waypoint>();
+
     [Tooltip("Optional traffic light guarding the approach to this waypoint. Leave empty if none.")]
     public TrafficLight controllingLight;
 
@@ -28,24 +31,40 @@ public class Waypoint : MonoBehaviour
 
     private void OnDrawGizmos()
     {
-        Gizmos.color = controllingLight != null ? Color.red : Color.cyan;
-        Gizmos.DrawWireSphere(transform.position, 0.4f);
-
-        if (nextWaypoints == null) return;
-        Gizmos.color = Color.yellow;
-        foreach (var next in nextWaypoints)
+        if (SimulationGizmoSettings.ShowWaypoints)
         {
-            if (next == null) continue;
-            Vector3 a = transform.position;
-            Vector3 b = next.transform.position;
-            Gizmos.DrawLine(a, b);
-            // small arrow head
-            Vector3 dir = (b - a).normalized;
-            Vector3 mid = Vector3.Lerp(a, b, 0.9f);
-            Vector3 right = Quaternion.Euler(0, 25f, 0) * -dir * 0.6f;
-            Vector3 left  = Quaternion.Euler(0, -25f, 0) * -dir * 0.6f;
-            Gizmos.DrawLine(mid, mid + right);
-            Gizmos.DrawLine(mid, mid + left);
+            Gizmos.color = controllingLight != null ? Color.red : Color.cyan;
+            Gizmos.DrawWireSphere(transform.position, 0.4f);
+
+            if (nextWaypoints != null)
+            {
+                Gizmos.color = Color.yellow;
+                foreach (var next in nextWaypoints)
+                {
+                    if (next == null) continue;
+                    Vector3 a = transform.position;
+                    Vector3 b = next.transform.position;
+                    Gizmos.DrawLine(a, b);
+                    // small arrow head
+                    Vector3 dir = (b - a).normalized;
+                    Vector3 mid = Vector3.Lerp(a, b, 0.9f);
+                    Vector3 right = Quaternion.Euler(0, 25f, 0) * -dir * 0.6f;
+                    Vector3 left  = Quaternion.Euler(0, -25f, 0) * -dir * 0.6f;
+                    Gizmos.DrawLine(mid, mid + right);
+                    Gizmos.DrawLine(mid, mid + left);
+                }
+            }
+        }
+
+        // Lane neighbours drawn in green so they're distinguishable from route arrows.
+        if (SimulationGizmoSettings.ShowLaneLinks && laneNeighbors != null)
+        {
+            Gizmos.color = Color.green;
+            foreach (var n in laneNeighbors)
+            {
+                if (n == null) continue;
+                Gizmos.DrawLine(transform.position, n.transform.position);
+            }
         }
     }
 }

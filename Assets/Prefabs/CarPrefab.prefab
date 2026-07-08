@@ -13,6 +13,7 @@ GameObject:
   - component: {fileID: 8359865804881078797}
   - component: {fileID: 3953097490114934854}
   - component: {fileID: 6428084736169010027}
+  - component: {fileID: 2045392166281039671}
   m_Layer: 6
   m_Name: CarPrefab
   m_TagString: Untagged
@@ -68,7 +69,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 9452ae1262a74094f8a68013fbcd1834, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -131,8 +132,48 @@ MonoBehaviour:
   acceleration: 6
   braking: 12
   turnSpeed: 6
+  randomizeSpeed: 1
+  randomSpeedMin: 4
+  randomSpeedMax: 12
   sensorLength: 4
   sensorRadius: 0.4
   carLayerMask:
     serializedVersion: 2
     m_Bits: 4294967295
+  mass: 800
+  driveGain: 8
+  lateralDamping: 20
+  traction: 0.6
+  linearDamping: 8
+  angularDamping: 5
+  enableLaneChanges: 1
+  laneChangeCooldown: 2
+  overtakeSpeedMargin: 1.5
+  laneChangeClearRadius: 2.5
+--- !u!54 &2045392166281039671
+Rigidbody:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8520152701196579648}
+  serializedVersion: 5
+  m_Mass: 1
+  m_LinearDamping: 0
+  m_AngularDamping: 0.05
+  m_CenterOfMass: {x: 0, y: 0, z: 0}
+  m_InertiaTensor: {x: 1, y: 1, z: 1}
+  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ImplicitCom: 1
+  m_ImplicitTensor: 1
+  m_UseGravity: 1
+  m_IsKinematic: 0
+  m_Interpolate: 0
+  m_Constraints: 0
+  m_CollisionDetection: 0

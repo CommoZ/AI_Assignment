@@ -26,6 +26,13 @@ public class CarAI : MonoBehaviour
     public float braking = 12f;
     public float turnSpeed = 10f;
 
+    [Tooltip("If ticked, this car picks a random maxSpeed between Random Speed Min/Max when it spawns.")]
+    public bool randomizeSpeed = false;
+    [Tooltip("Lowest possible maxSpeed when Randomize Speed is on.")]
+    public float randomSpeedMin = 4f;
+    [Tooltip("Highest possible maxSpeed when Randomize Speed is on.")]
+    public float randomSpeedMax = 12f;
+
     [Header("Sensing")]
     [Tooltip("How far ahead the car looks for other cars.")]
     public float sensorLength = 4f;
@@ -49,10 +56,21 @@ public class CarAI : MonoBehaviour
     [Tooltip("Rigidbody angular damping — reduces spinning after off-centre hits.")]
     public float angularDamping = 5f;
 
+    [Header("Lane changing / overtaking (highway)")]
+    [Tooltip("If true, when a SLOWER car is detected ahead the car may retarget to a faster/clear lane neighbour.")]
+    public bool enableLaneChanges = true;
+    [Tooltip("Seconds that must pass between two lane changes on the same car.")]
+    public float laneChangeCooldown = 2f;
+    [Tooltip("A car ahead counts as 'slower' only if it is at least this much slower than my current speed (m/s).")]
+    public float overtakeSpeedMargin = 1.5f;
+    [Tooltip("Radius around a candidate lane-neighbour that must be clear of other cars before moving there.")]
+    public float laneChangeClearRadius = 2.5f;
+
     // Runtime
     private Rigidbody rb;
     private float currentSpeed;
     private bool destroyed;
+    private float lastLaneChangeTime = -999f;
 
     public float CurrentSpeed => currentSpeed;
     /// <summary>True when the car is essentially not moving (part of a jam).</summary>
@@ -71,6 +89,10 @@ public class CarAI : MonoBehaviour
                        | RigidbodyConstraints.FreezeRotationZ;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+
+        // Per-car random top speed so faster cars catch and overtake slower ones.
+        if (randomizeSpeed)
+            maxSpeed = Random.Range(randomSpeedMin, randomSpeedMax);
 
         // Frictionless per-instance material so ground contact / grazing hits
         // don't secretly drain speed.
@@ -133,12 +155,23 @@ public class CarAI : MonoBehaviour
         }
 
         // 2) Car directly ahead?
-        if (SenseCarAhead(out float hitDistance))
+        if (SenseCarAhead(out float hitDistance, out CarAI carAhead))
         {
             if (hitDistance < sensorLength * 0.5f) shouldStop = true;
             else if (hitDistance < sensorLength)
                 currentSpeed = Mathf.Min(currentSpeed, maxSpeed * (hitDistance / sensorLength));
-        }
+
+            // 3) The car ahead is meaningfully SLOWER than the speed I want to drive
+            //    -> consider overtaking. Compare against maxSpeed (my desired speed), NOT
+            //    currentSpeed, because currentSpeed is already braking to match the blocker.
+            bool aheadIsSlower = carAhead != null &&
+                                 carAhead.CurrentSpeed < maxSpeed - overtakeSpeedMargin;
+            if (enableLaneChanges && aheadIsSlower &&
+                Time.time - lastLaneChangeTime > laneChangeCooldown)
+            {
+                if (TryOvertake(carAhead.CurrentSpeed))
+                    lastLaneChangeTime = Time.time;
+            }        }
 
         float targetSpeed = shouldStop ? 0f : maxSpeed;
         float rate = (targetSpeed > currentSpeed) ? acceleration : braking;
@@ -197,9 +230,10 @@ public class CarAI : MonoBehaviour
         currentSpeed = Mathf.Clamp(forwardVelAfterImpact, 0f, maxSpeed);
     }
 
-    private bool SenseCarAhead(out float distance)
+    private bool SenseCarAhead(out float distance, out CarAI carAhead)
     {
         distance = 0f;
+        carAhead = null;
         Vector3 origin = transform.position + transform.forward * 0.5f + Vector3.up * 0.3f;
         if (Physics.SphereCast(origin, sensorRadius, transform.forward, out RaycastHit hit,
                 sensorLength, carLayerMask, QueryTriggerInteraction.Ignore))
@@ -208,9 +242,68 @@ public class CarAI : MonoBehaviour
             if (hit.collider.transform == transform || hit.collider.transform.IsChildOf(transform))
                 return false;
             distance = hit.distance;
+            carAhead = hit.collider.GetComponentInParent<CarAI>();
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Try to move into a lane neighbour of the current waypoint in order to overtake.
+    /// A candidate lane is accepted only if:
+    ///   - the spot around the neighbour waypoint is clear of cars, AND
+    ///   - the nearest car in that lane (if any) is faster than the car we're stuck behind.
+    /// Returns true if the target changed.
+    /// </summary>
+    private bool TryOvertake(float blockingCarSpeed)
+    {
+        if (currentTarget == null) return false;
+        var neighbours = currentTarget.laneNeighbors;
+        if (neighbours == null || neighbours.Count == 0) return false;
+
+        for (int i = 0; i < neighbours.Count; i++)
+        {
+            Waypoint candidate = neighbours[i];
+            if (candidate == null) continue;
+
+            if (!IsSpotClear(candidate.transform.position, laneChangeClearRadius,
+                             out CarAI nearestInLane))
+                continue;
+
+            // Accept if the lane is empty, or its nearest car is faster than our blocker.
+            if (nearestInLane == null || nearestInLane.CurrentSpeed > blockingCarSpeed)
+            {
+                currentTarget = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True if no other car overlaps the given radius. Also outputs the nearest car found
+    /// (null if none) so the caller can compare speeds.
+    /// </summary>
+    private bool IsSpotClear(Vector3 pos, float radius, out CarAI nearest)
+    {
+        nearest = null;
+        float nearestSqr = float.MaxValue;
+        bool clear = true;
+
+        Collider[] hits = Physics.OverlapSphere(pos, radius, carLayerMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < hits.Length; i++)
+        {
+            var h = hits[i];
+            if (h == null) continue;
+            if (h.transform == transform || h.transform.IsChildOf(transform)) continue;
+            var other = h.GetComponentInParent<CarAI>();
+            if (other == null) continue;
+
+            clear = false;
+            float d = (h.transform.position - pos).sqrMagnitude;
+            if (d < nearestSqr) { nearestSqr = d; nearest = other; }
+        }
+        return clear;
     }
 
     public void Despawn()
@@ -221,6 +314,7 @@ public class CarAI : MonoBehaviour
 
     private void OnDrawGizmosSelected()
     {
+        if (!SimulationGizmoSettings.ShowCarSensors) return;
         Gizmos.color = Color.magenta;
         Vector3 origin = transform.position + transform.forward * 0.5f + Vector3.up * 0.3f;
         Gizmos.DrawLine(origin, origin + transform.forward * sensorLength);
