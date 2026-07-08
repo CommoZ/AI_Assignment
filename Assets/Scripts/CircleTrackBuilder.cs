@@ -1,38 +1,53 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
 /// Editor helper. Attach to an empty GameObject and choose "Rebuild waypoints"
 /// from the component's context menu (three-dot icon in the Inspector, or
 /// right-click the component header). It removes any child GameObjects and
-/// generates <see cref="waypointCount"/> new <see cref="Waypoint"/> children
-/// spaced evenly around a circle of the given radius, linked into a closed loop.
+/// generates one or more concentric ring lanes of <see cref="Waypoint"/> children:
+///   - <see cref="laneCount"/> concentric lanes, spaced <see cref="laneWidth"/> apart.
+///   - <see cref="waypointCount"/> waypoints evenly around each ring.
+///   - nextWaypoints wired around each ring into a closed loop.
+///   - laneNeighbors wired between adjacent rings so CarAI can change lanes / overtake.
 ///
-/// This does NOT change how <see cref="CarAI"/> drives — cars still go waypoint
-/// to waypoint. It just lets you produce a very fine ring (e.g. 48 or 64 nodes)
-/// so the path looks like an exact circle.
+/// This does NOT change how <see cref="CarAI"/> drives — cars still go waypoint to
+/// waypoint. A fine ring (e.g. 48 or 64 nodes) makes the path look like an exact circle.
 /// </summary>
 [ExecuteAlways]
 public class CircleTrackBuilder : MonoBehaviour
 {
-    [Tooltip("Radius of the circle, in metres.")]
+    [Header("Rings")]
+    [Tooltip("Radius of the innermost lane, in metres.")]
     public float radius = 10f;
 
-    [Tooltip("Number of waypoints around the ring. Higher = smoother circle. 32–64 looks perfect.")]
+    [Tooltip("Number of concentric lanes. 1 = single ring. 2–3 = a multi-lane ring road.")]
+    [Min(1)] public int laneCount = 1;
+
+    [Tooltip("Radial distance between adjacent lane centres (metres). Lane 0 is innermost.")]
+    public float laneWidth = 2.5f;
+
+    [Header("Nodes")]
+    [Tooltip("Number of waypoints around each ring. Higher = smoother circle. 32–64 looks perfect.")]
     [Min(3)] public int waypointCount = 48;
 
     [Tooltip("Y position of each waypoint (car height).")]
     public float height = 0.25f;
 
+    [Header("Direction")]
     [Tooltip("If true, cars go anticlockwise (looking down from above). Uncheck for clockwise.")]
     public bool anticlockwise = true;
 
     [Tooltip("Optional starting angle offset in degrees.")]
     public float startAngleDegrees = 0f;
 
+    [Tooltip("If true, adjacent lanes are linked both ways so cars can move in/out. If false, no lane changes are wired.")]
+    public bool linkLaneNeighbors = true;
+
     [ContextMenu("Rebuild waypoints")]
     public void Rebuild()
     {
-        // Remove all existing children (previous waypoints).
+        // Remove all existing children (previous lanes / waypoints).
         for (int i = transform.childCount - 1; i >= 0; i--)
         {
             var child = transform.GetChild(i).gameObject;
@@ -40,43 +55,93 @@ public class CircleTrackBuilder : MonoBehaviour
             else DestroyImmediate(child);
         }
 
-        // Create fresh waypoints on the circle.
-        Waypoint[] wps = new Waypoint[waypointCount];
+        // [lane][node]
+        Waypoint[,] grid = new Waypoint[laneCount, waypointCount];
         float startRad = startAngleDegrees * Mathf.Deg2Rad;
-        for (int i = 0; i < waypointCount; i++)
-        {
-            float t = i / (float)waypointCount;
-            float angle = startRad + t * Mathf.PI * 2f * (anticlockwise ? 1f : -1f);
-            Vector3 local = new Vector3(Mathf.Cos(angle) * radius, height, Mathf.Sin(angle) * radius);
+        float dir = anticlockwise ? 1f : -1f;
 
-            GameObject go = new GameObject($"WP_{i:00}");
-            go.transform.SetParent(transform, worldPositionStays: false);
-            go.transform.localPosition = local;
-            wps[i] = go.AddComponent<Waypoint>();
+        for (int lane = 0; lane < laneCount; lane++)
+        {
+            float laneRadius = radius + lane * laneWidth;
+            Transform laneParent = new GameObject($"Lane_{lane}").transform;
+            laneParent.SetParent(transform, worldPositionStays: false);
+            laneParent.localPosition = Vector3.zero;
+            laneParent.localRotation = Quaternion.identity;
+
+            for (int n = 0; n < waypointCount; n++)
+            {
+                float t = n / (float)waypointCount;
+                float angle = startRad + t * Mathf.PI * 2f * dir;
+                Vector3 local = new Vector3(Mathf.Cos(angle) * laneRadius, height, Mathf.Sin(angle) * laneRadius);
+
+                GameObject go = new GameObject($"WP_L{lane}_{n:00}");
+                go.transform.SetParent(laneParent, worldPositionStays: false);
+                go.transform.localPosition = local;
+                grid[lane, n] = go.AddComponent<Waypoint>();
+            }
         }
 
-        // Link into a closed loop: 0 -> 1 -> 2 -> ... -> N-1 -> 0
-        for (int i = 0; i < waypointCount; i++)
+        // Wire nextWaypoints around each ring into a closed loop.
+        for (int lane = 0; lane < laneCount; lane++)
         {
-            wps[i].nextWaypoints.Clear();
-            wps[i].nextWaypoints.Add(wps[(i + 1) % waypointCount]);
+            for (int n = 0; n < waypointCount; n++)
+            {
+                var wp = grid[lane, n];
+                wp.nextWaypoints.Clear();
+                wp.nextWaypoints.Add(grid[lane, (n + 1) % waypointCount]);
+            }
         }
 
-        Debug.Log($"[CircleTrackBuilder] Rebuilt {waypointCount} waypoints on a radius-{radius:0.##} ring.");
+        // Wire laneNeighbors between adjacent rings (same node index).
+        if (linkLaneNeighbors)
+        {
+            for (int lane = 0; lane < laneCount; lane++)
+            {
+                for (int n = 0; n < waypointCount; n++)
+                {
+                    var wp = grid[lane, n];
+                    wp.laneNeighbors.Clear();
+                    if (lane - 1 >= 0)        wp.laneNeighbors.Add(grid[lane - 1, n]);
+                    if (lane + 1 < laneCount) wp.laneNeighbors.Add(grid[lane + 1, n]);
+                }
+            }
+        }
+
+        Debug.Log($"[CircleTrackBuilder] Rebuilt {laneCount} lane(s) x {waypointCount} nodes " +
+                  $"({laneCount * waypointCount} waypoints) from radius {radius:0.##}.");
     }
 
-    // Visualise the ring in the Scene view even before you press Rebuild.
+    /// <summary>First waypoint (node 0) of each lane. Useful for hooking up a spawner.</summary>
+    public List<Waypoint> GetLaneStarts()
+    {
+        var starts = new List<Waypoint>();
+        foreach (Transform lane in transform)
+        {
+            if (lane.childCount > 0)
+            {
+                var wp = lane.GetChild(0).GetComponent<Waypoint>();
+                if (wp != null) starts.Add(wp);
+            }
+        }
+        return starts;
+    }
+
+    // Visualise every ring in the Scene view even before you press Rebuild.
     private void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.cyan;
         const int segs = 64;
-        Vector3 prev = transform.TransformPoint(new Vector3(radius, height, 0f));
-        for (int i = 1; i <= segs; i++)
+        for (int lane = 0; lane < Mathf.Max(1, laneCount); lane++)
         {
-            float a = (i / (float)segs) * Mathf.PI * 2f;
-            Vector3 p = transform.TransformPoint(new Vector3(Mathf.Cos(a) * radius, height, Mathf.Sin(a) * radius));
-            Gizmos.DrawLine(prev, p);
-            prev = p;
+            float laneRadius = radius + lane * laneWidth;
+            Vector3 prev = transform.TransformPoint(new Vector3(laneRadius, height, 0f));
+            for (int i = 1; i <= segs; i++)
+            {
+                float a = (i / (float)segs) * Mathf.PI * 2f;
+                Vector3 p = transform.TransformPoint(new Vector3(Mathf.Cos(a) * laneRadius, height, Mathf.Sin(a) * laneRadius));
+                Gizmos.DrawLine(prev, p);
+                prev = p;
+            }
         }
     }
 }

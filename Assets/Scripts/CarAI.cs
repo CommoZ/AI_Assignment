@@ -33,6 +33,16 @@ public class CarAI : MonoBehaviour
     [Tooltip("Highest possible maxSpeed when Randomize Speed is on.")]
     public float randomSpeedMax = 12f;
 
+    [Header("Speed colour")]
+    [Tooltip("If ticked, the car's body is tinted from red (stopped) to green (max speed).")]
+    public bool colorBySpeed = true;
+    [Tooltip("Renderer to tint. If left empty, the first renderer on this car (or its children) is used.")]
+    public Renderer bodyRenderer;
+    [Tooltip("Colour at zero speed.")]
+    public Color slowColor = Color.red;
+    [Tooltip("Colour at max speed.")]
+    public Color fastColor = Color.green;
+
     [Header("Sensing")]
     [Tooltip("How far ahead the car looks for other cars.")]
     public float sensorLength = 4f;
@@ -71,9 +81,11 @@ public class CarAI : MonoBehaviour
     private float currentSpeed;
     private bool destroyed;
     private float lastLaneChangeTime = -999f;
+    private MaterialPropertyBlock mpb;
+    private static readonly int ColorId = Shader.PropertyToID("_BaseColor");
+    private static readonly int ColorIdLegacy = Shader.PropertyToID("_Color");
 
-    public float CurrentSpeed => currentSpeed;
-    /// <summary>True when the car is essentially not moving (part of a jam).</summary>
+    public float CurrentSpeed => currentSpeed;    /// <summary>True when the car is essentially not moving (part of a jam).</summary>
     public bool IsStopped => Mathf.Abs(currentSpeed) < 0.2f;
 
     private void Awake()
@@ -93,6 +105,11 @@ public class CarAI : MonoBehaviour
         // Per-car random top speed so faster cars catch and overtake slower ones.
         if (randomizeSpeed)
             maxSpeed = Random.Range(randomSpeedMin, randomSpeedMax);
+
+        // Cache the renderer to tint by speed.
+        if (bodyRenderer == null)
+            bodyRenderer = GetComponentInChildren<Renderer>();
+        mpb = new MaterialPropertyBlock();
 
         // Frictionless per-instance material so ground contact / grazing hits
         // don't secretly drain speed.
@@ -171,7 +188,8 @@ public class CarAI : MonoBehaviour
             {
                 if (TryOvertake(carAhead.CurrentSpeed))
                     lastLaneChangeTime = Time.time;
-            }        }
+            }
+        }
 
         float targetSpeed = shouldStop ? 0f : maxSpeed;
         float rate = (targetSpeed > currentSpeed) ? acceleration : braking;
@@ -186,6 +204,25 @@ public class CarAI : MonoBehaviour
             if (next == null) { Despawn(); return; }
             currentTarget = next;
         }
+
+        UpdateBodyColor();
+    }
+
+    /// <summary>
+    /// Tints the body renderer from slowColor (0 speed) to fastColor (max speed).
+    /// Uses a MaterialPropertyBlock so it doesn't create per-car material instances.
+    /// </summary>
+    private void UpdateBodyColor()
+    {
+        if (!colorBySpeed || bodyRenderer == null || mpb == null) return;
+
+        float t = maxSpeed > 0.01f ? Mathf.Clamp01(currentSpeed / maxSpeed) : 0f;
+        Color c = Color.Lerp(slowColor, fastColor, t);
+
+        bodyRenderer.GetPropertyBlock(mpb);
+        mpb.SetColor(ColorId, c);       // URP/HDRP Lit uses _BaseColor
+        mpb.SetColor(ColorIdLegacy, c); // Built-in Standard uses _Color
+        bodyRenderer.SetPropertyBlock(mpb);
     }
 
     /// <summary>
