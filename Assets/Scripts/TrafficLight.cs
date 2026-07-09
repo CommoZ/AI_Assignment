@@ -22,6 +22,10 @@ public class TrafficLight : MonoBehaviour
     [SerializeField] private State currentState = State.Red;
     private float timer;
 
+    [Header("Manual control")]
+    [Tooltip("If true, this light does NOT auto-cycle. Its state is set by clicks (ClickableTrafficLight) or by calling Toggle()/SetState().")]
+    public bool manualControl = false;
+
     /// <summary>If true, an external controller (e.g. TrafficLightGroup) drives the state.</summary>
     public bool ExternallyDriven { get; set; }
 
@@ -37,7 +41,7 @@ public class TrafficLight : MonoBehaviour
 
     private void Update()
     {
-        if (ExternallyDriven) return;
+        if (ExternallyDriven || manualControl) return;
 
         timer += Time.deltaTime;
         switch (currentState)
@@ -46,6 +50,12 @@ public class TrafficLight : MonoBehaviour
             case State.Yellow: if (timer >= yellowTime) SetState(State.Red);    break;
             case State.Red:    if (timer >= redTime)    SetState(State.Green);  break;
         }
+    }
+
+    /// <summary>Flip straight between Green (go) and Red (stop). Used by click control.</summary>
+    public void Toggle()
+    {
+        SetState(currentState == State.Green ? State.Red : State.Green);
     }
 
     public void SetState(State newState)
