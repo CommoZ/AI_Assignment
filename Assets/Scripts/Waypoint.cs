@@ -23,6 +23,19 @@ public class Waypoint : MonoBehaviour
     [Tooltip("How far before this waypoint a car should stop when the light is red.")]
     public float stopLineDistance = 2f;
 
+    [Tooltip("If true, this is an unsignalled give-way point (junction entry / roundabout entry): a car must wait here until the conflict zone around it is clear of other cars.")]
+    public bool isYield = false;
+
+    private void OnEnable()
+    {
+        TrafficSimulationManager.RegisterNode(this);
+    }
+
+    private void OnDisable()
+    {
+        TrafficSimulationManager.UnregisterNode(this);
+    }
+
     public Waypoint GetRandomNext()
     {
         if (nextWaypoints == null || nextWaypoints.Count == 0) return null;
@@ -33,7 +46,10 @@ public class Waypoint : MonoBehaviour
     {
         if (SimulationGizmoSettings.ShowWaypoints)
         {
-            Gizmos.color = controllingLight != null ? Color.red : Color.cyan;
+            // Red = light-controlled, orange = give-way/yield, cyan = plain node.
+            Gizmos.color = controllingLight != null ? Color.red
+                         : isYield ? new Color(1f, 0.55f, 0f)
+                         : Color.cyan;
             Gizmos.DrawWireSphere(transform.position, 0.4f);
 
             if (nextWaypoints != null)

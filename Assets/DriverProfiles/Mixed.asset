@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8e4a2d0b3c7f5061927b3c4d5e6f7182, type: 3}
+  m_Name: Mixed
+  m_EditorClassIdentifier: Assembly-CSharp::DriverPopulation
+  entries:
+  - profile: {fileID: 11400000, guid: 9f686fcb44ec98848b2298f7dcbd0c94, type: 2}
+    weight: 0.5
+  - profile: {fileID: 11400000, guid: 4bf9b5fa6dd432f4386dae2dc9628fda, type: 2}
+    weight: 0.2
+  - profile: {fileID: 11400000, guid: 1caed96fb10d8594c9c547a4e77529fb, type: 2}
+    weight: 0.2
+  - profile: {fileID: 11400000, guid: b41b4cafb231dad4bbfda77fe4463214, type: 2}
+    weight: 0.1
+  globalOverride: {fileID: 0}
+  perfectProfile: {fileID: 11400000, guid: 98d4d696bed5ca34fadb0e77224c0fc8, type: 2}

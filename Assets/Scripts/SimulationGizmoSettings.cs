@@ -24,10 +24,14 @@ public class SimulationGizmoSettings : MonoBehaviour
     [Tooltip("Show the magenta forward sensor ray on the selected car.")]
     public bool showCarSensors = true;
 
+    [Tooltip("Show the blue GPS route line from the selected car to its destination.")]
+    public bool showRoutes = true;
+
     // Static mirror so gizmo code can read without a reference. Default all-on.
     public static bool ShowWaypoints  = true;
     public static bool ShowLaneLinks  = true;
     public static bool ShowCarSensors = true;
+    public static bool ShowRoutes     = true;
 
     private void OnEnable()  { Apply(); }
     private void OnValidate() { Apply(); }
@@ -38,5 +42,6 @@ public class SimulationGizmoSettings : MonoBehaviour
         ShowWaypoints  = showWaypoints;
         ShowLaneLinks  = showLaneLinks;
         ShowCarSensors = showCarSensors;
+        ShowRoutes     = showRoutes;
     }
 }

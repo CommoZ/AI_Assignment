@@ -23,8 +23,10 @@ public class TrafficLightGroup : MonoBehaviour
 
     private void Start()
     {
-        foreach (var l in phaseA) if (l != null) l.ExternallyDriven = true;
-        foreach (var l in phaseB) if (l != null) l.ExternallyDriven = true;
+        // Take ownership of every non-manual light. A light a user has grabbed via
+        // ClickableTrafficLight (manualControl) is left alone so the two don't fight.
+        foreach (var l in phaseA) if (l != null && !l.manualControl) l.ExternallyDriven = true;
+        foreach (var l in phaseB) if (l != null && !l.manualControl) l.ExternallyDriven = true;
         ApplyStep();
     }
 
@@ -53,6 +55,7 @@ public class TrafficLightGroup : MonoBehaviour
 
     private static void SetAll(List<TrafficLight> lights, TrafficLight.State s)
     {
-        foreach (var l in lights) if (l != null) l.SetState(s);
+        // Skip manually-controlled lights: precedence is manualControl > group > auto-cycle.
+        foreach (var l in lights) if (l != null && !l.manualControl) l.SetState(s);
     }
 }

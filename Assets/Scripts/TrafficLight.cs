@@ -31,8 +31,26 @@ public class TrafficLight : MonoBehaviour
 
     public State CurrentState => currentState;
 
-    /// <summary>Cars may pass on Green only. Yellow and Red both stop new arrivals.</summary>
+    /// <summary>Cars may pass freely on Green. Yellow and Red stop new arrivals.</summary>
     public bool CanPass => currentState == State.Green;
+
+    /// <summary>
+    /// Whether a car this far from the stop line must stop for the light.
+    ///  - Green: never.
+    ///  - Red: always.
+    ///  - Yellow: yes, UNLESS the car is already inside <paramref name="commitDistance"/> and can
+    ///    no longer stop safely, in which case it clears the junction (dilemma zone). This stops
+    ///    a shared-yellow phase from freezing cars that are already committed.
+    /// </summary>
+    public bool RequiresStop(float distanceToStopLine, float commitDistance)
+    {
+        switch (currentState)
+        {
+            case State.Green:  return false;
+            case State.Yellow: return distanceToStopLine > commitDistance;
+            default:           return true; // Red
+        }
+    }
 
     private void Start()
     {

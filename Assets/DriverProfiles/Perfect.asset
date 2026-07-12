@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7d3f1c9a2b6e4f5081a2c3d4e5f60718, type: 3}
+  m_Name: Perfect
+  m_EditorClassIdentifier: Assembly-CSharp::DriverProfile
+  displayName: Perfect
+  useBodyColorTint: 0
+  bodyColorTint: {r: 0.2, g: 1, b: 0.4, a: 1}
+  isPerfect: 1
+  reactionTimeMin: 0.2
+  reactionTimeMax: 0.6
+  aggression: 0.5
+  patience: 0.5
+  awareness: 1
+  speedMinFactor: 0.9
+  speedMaxFactor: 1.1
+  frustrationRiseRate: 0.25
+  frustrationDecayRate: 0.4
+  maxFrustrationAggressionBonus: 0.5
