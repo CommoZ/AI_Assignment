@@ -83,6 +83,13 @@ public class DriverProfile : ScriptableObject
         return Random.Range(speedMinFactor, Mathf.Max(speedMinFactor, speedMaxFactor));
     }
 
+    /// <summary>Per-car top-speed factor drawn from a caller-supplied RNG (for reproducible demand).</summary>
+    public float RollSpeedFactor(System.Random rng)
+    {
+        float hi = Mathf.Max(speedMinFactor, speedMaxFactor);
+        return speedMinFactor + (float)rng.NextDouble() * (hi - speedMinFactor);
+    }
+
     /// <summary>Multiplier on the base following distance. &lt;1 tailgates, &gt;1 keeps a big gap.</summary>
     public float FollowGapMultiplier(float frustration)
     {

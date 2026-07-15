@@ -31,10 +31,11 @@ surface is a *cosmetic* mesh generated from the graph (`RoadRenderer`) — it ha
 
 | Script | Role |
 |--------|------|
-| `TrafficSimulationManager` | Singleton. Registries of all **cars** and all **waypoint nodes**; jam metrics (count, avg speed, % stopped, avg frustration); collision counter + history graph; **intersection reservation zones**; global controls (pause, timescale, maxCars). Most of its API is `static`. |
-| `CarSpawner` | Spawns `CarPrefab` at random spawn waypoints on a timer, up to `maxCars`. Assigns each car a `DriverProfile` from a `DriverPopulation`, and (if `assignDestinations`) a random destination + an A\* route. |
+| `TrafficSimulationManager` | Singleton. Registries of all **cars** and all **waypoint nodes**; jam metrics (count, avg speed, % stopped, avg frustration, **throughput, avg trip time, completed trips**); collision counter; a **time-series sample buffer** feeding the graphs + **CSV export**; **intersection reservation zones**; **global environment knobs** (`RoadGrip`, `GlobalSpeedLimit`, `DemandMultiplier`); **scenario seed + `RestartScenario`**; **incident helpers** (`StallRandomCar`, `ClearAllStalls`). Global controls (pause, timescale, maxCars). Most of its API is `static`. |
+| `CarSpawner` | Spawns `CarPrefab` on a timer, up to `maxCars`. Draws each car's **origin, destination and archetype from an isolated seeded `System.Random`** (reproducible demand) per a `DemandPattern` (Uniform / Hotspot / Commuter). Destinations are real intersection ports. Assigns a `DriverProfile` from a `DriverPopulation` and an A\* route. See §12. |
 | `CarAI` | The agent. See §3. |
-| `SimulationUI` | IMGUI panel (no canvas). All live tuning + the collision graph. |
+| `CarSelectionController` | Left-click a car to **select** it (drives the inspector + cyan tint + route line); with one selected, left-click a road to **re-route** it there; Esc deselects. Added at runtime by `SimulationUI` (no scene regen). Mirrors `ClickableTrafficLight`. |
+| `SimulationUI` | IMGUI panel (no canvas). All live tuning, scenario/environment/incident controls, metric readouts + graphs, CSV export. |
 | `SimulationGizmoSettings` | Static toggles for editor gizmos (waypoints, lane links, sensors, routes). |
 | `CameraController` | Free-fly camera: right-drag to look, WASD/QE move, Shift sprint, scroll zoom. Runs on unscaled time. |
 
@@ -90,9 +91,10 @@ a car with no profile falls back to its raw inspector values.
 distance; default cost = segment length (`DistanceCost`). The reverse-adjacency map is cached and
 rebuilt only when the node count changes (`InvalidateCache()` after runtime rebuilds).
 
-`IEdgeCost` is the extension seam: a future `CongestionCost` (travel time from live density) drops
-in for **congestion-aware rerouting** without touching cars or the pathfinder — this is the planned
-"cars react to traffic" upgrade. Cars follow a static shortest path today.
+`IEdgeCost` is the extension seam, and three implementations exist: `DistanceCost` (default),
+`AvoidNodeCost` (incident detours, §14), and `CongestionCost` (**congestion-aware routing**, §15).
+`TrafficSimulationManager.ActiveEdgeCost` picks distance vs congestion cost globally; cars call
+`FindPath` with it, so switching routing modes touches neither the cars nor the pathfinder.
 
 ---
 
@@ -171,12 +173,24 @@ wired correctly via the Unity API (avoids fragile `.unity` YAML). Menu **`Traffi
 - **Generate Driver Assets** → writes the 5 profiles + `Mixed.asset` population to `Assets/DriverProfiles/`.
 - **Generate City Scene** → `Assets/Scenes/City.unity`: signalised 4×4 grid demoing GPS routing.
 - **Generate Junctions Scene** → `Assets/Scenes/Junctions.unity`: a 4-way + a roundabout.
+- **Generate Highway Scene** → `Assets/Scenes/Highway.unity`: a long 3-lane road, on-ramp merge
+  (give-way) + off-ramp diverge, two spawners (main + ramp). Overtaking and merging demo. Ramps are
+  wired to the road with direct edges (`LinkTo` to the `NearestWaypoint`), since `MultiLaneRoadBuilder`
+  places no connectors.
+- **Generate Ring Scene** → `Assets/Scenes/Ring.unity`: a single-lane closed loop (no despawn);
+  raise Max cars and briefly break a car down to trigger a **phantom (stop-and-go) jam**.
 
 Each generated scene has: ground, free camera, sun, a `Systems` object (manager + UI + gizmo
 settings), the builder(s), a `Spawner`, and a `Roads` object (`RoadRenderer`).
 
 **To run:** open a generated scene → Play. Use the panel to tune; fly with the camera controls.
 **Legacy sandbox scenes** (`Traffic`, `CircleTraffic`, `TestRoads`) predate the generator.
+
+**Scene shortcuts** (`SceneSwitcher`, runtime-added by `SimulationUI`): **F1** City · **F2** Junctions
+· **F3** Highway · **F4** Ring · **F5** reset (reload current scene) — via `SceneManager`. Function
+keys are used so they don't collide with typing the seed. Target scenes must be in **Build Settings**:
+the generator registers each scene on save, or run **`Traffic Sim ▸ Add Generated Scenes To Build
+Settings`** once for pre-existing scenes. `SceneSwitcher` warns if a scene isn't registered.
 
 > ⚠️ **Regeneration rule.** Changes to *builders, the generator, or scene contents* require
 > re-running the menu to take effect (scenes are baked). Changes to *runtime code only*
@@ -187,9 +201,22 @@ settings), the builder(s), a `Spawner`, and a `Roads` object (`RoadRenderer`).
 
 ## 10. The live control panel (`SimulationUI`)
 
-Pause · time scale · **Max cars** · Clear all cars · **Collisions** counter + Reset + live
-bar-graph over time · spawn interval · **Perfect mode** · route-gizmo toggle · signal green time
-(live) · **city grid size + Rebuild** (city scene). All apply at runtime.
+A scrolling IMGUI window, everything live:
+- **Time** — pause · time scale.
+- **Metrics** — car count · avg speed · % stopped · frustration · **throughput (cars/min)** · **avg
+  trip time** · **completed trips** · **collisions**; three time-series bar-graphs (collisions, avg
+  speed, throughput) + **Export CSV** (writes to `Application.persistentDataPath`). Max cars · Clear
+  all cars · collisions Reset.
+- **Scenario** — **seed + Restart scenario** (deterministic replay) · **demand pattern** selector
+  (Uniform / Hotspot / Commuter) · commuter **phase** toggle. See §13.
+- **Environment** — **road grip** (weather) · **global speed limit** · **rush-hour demand** multiplier.
+  See §13.
+- **Routing** — **congestion-aware routing** toggle · **congestion weight**. See §15.
+- **Incidents** — Break down random car · Clear all · live stalled count. See §14.
+- Spawn interval · **Perfect mode** · route-gizmo toggle · signal green time · **city grid + Rebuild**.
+
+A second **Selected Car** window appears when you left-click a car (§16): driver/origin/destination,
+live + editable current/max speed, break down/repair, deselect.
 
 ---
 
@@ -217,3 +244,85 @@ bar-graph over time · spawn interval · **Perfect mode** · route-gizmo toggle 
   existing prefab unless the prefab was re-serialized — set safety-critical values in code if unsure.
 - **`CarPrefab`** must have `CarAI` + `Rigidbody` + a `Collider`; the spawner loads it from
   `Assets/Prefabs/CarPrefab.prefab`.
+
+## 13. Environment & Scenarios (reproducible experiments)
+
+**Environment** — three global statics on `TrafficSimulationManager`, read by `CarAI`/`CarSpawner`,
+all no-ops at their defaults:
+- `RoadGrip` (0.5–1) scales **braking + traction** (`CarAI.EffectiveBraking`, grip-scaled traction).
+  Lower grip lengthens stopping distance, so cars keep bigger gaps automatically via `SafeSpeed`. The
+  fixed hazard **horizons are grip-aware** so Perfect mode stays collision-free on wet roads: the
+  reservation detection window (`16/grip`), the corner slow-down window (`7/grip`), and the cornering
+  speed (`cornerSpeed·√grip`).
+- `GlobalSpeedLimit` (m/s, 0 = off) caps cruise speed.
+- `DemandMultiplier` scales the spawn rate (rush-hour surge).
+
+**Scenarios (reproducible demand)** — `CarSpawner` owns a seeded `System.Random` (isolated from
+`UnityEngine.Random`, whose consumption order is entangled with physics/frame timing). Each car's
+origin, destination and archetype are **drawn once** from that stream; a momentarily-blocked origin
+is **retried, not re-rolled**, so the draw order never shifts.
+`TrafficSimulationManager.RestartScenario` re-seeds every spawner + wipes metrics for a clean
+deterministic replay. `DemandPattern`:
+- **Uniform** — origins/destinations uniform over the ports.
+- **Hotspot** — destinations weighted toward the network centre (a downtown sink).
+- **Commuter** — `inboundPhase` flips morning (edges→centre) vs evening (centre→edges).
+
+Weighting uses each port's cached distance-from-centroid (`RefreshDemandCache`, recomputed when
+`spawnPoints` is reassigned by a city rebuild). Destinations are drawn **only from real intersection
+ports** — this replaces the old `RandomNodeExcept`, which sent cars to arbitrary mid-street nodes.
+(Caveat: the *demand sequence* is reproducible; Unity physics isn't bit-identical, so exact positions
+may drift slightly. Patterns only apply where `assignDestinations` is on, i.e. the City scene.)
+
+## 14. Incidents (breakdowns)
+
+`CarAI.StallFor` / `ClearStall` / `ToggleStall` break a car down: it holds position (dark tint) and
+stays a physical obstacle. In Perfect mode a stalled car **releases its junction reservation** unless
+it's committed inside the core, so it never freezes cross-traffic. Trigger a breakdown from the panel
+("Break down random car") or the selected-car inspector's **Break down / Repair** button (§16).
+
+Blocked followers escape in two ways, in order:
+1. **Physical side-pass** (`enableStallPass`, ~1.5 s stuck): the follower checks the side corridor
+   (left/oncoming lane first, then right) is clear of cars and approaching oncoming traffic, then
+   steers along a rolling point offset `passOffset` (~one lane) beside the stall — out, alongside,
+   and back in one arc. While passing, the stalled car is **ignored by the forward sensor** (that's
+   the point), speed is capped at `cornerSpeed`, and the **arrival radius is widened** so lane nodes
+   slid past while offset still advance the route. Roads have no colliders, so leaving the waypoint
+   line is physically free. Queued cars unwind one at a time — each starts its own pass only once it
+   directly senses the stall.
+2. **Graph detour** (`DetourDelay`, fallback): `RerouteAvoiding` re-plans with `AvoidNodeCost`
+   (penalises the blocked node) — only useful for cars that can still turn off before the blocked
+   stretch; a car already on a single-lane street has no graph alternative, hence the side-pass.
+
+## 15. Congestion-aware routing
+
+Cars can route around jams instead of following a fixed shortest path (the intended "cars react to
+traffic" upgrade, built on the `IEdgeCost` seam):
+- **Live congestion map** (`TrafficSimulationManager`): the 1 Hz sampler counts cars per
+  `currentTarget` node and EMA-smooths it (`Lerp(prev, count, 0.4)`, decays to 0 and drops empty
+  nodes). `NodeCongestion(w)` reads it — the "weighted road node".
+- **`CongestionCost : IEdgeCost`** (`Pathfinder.cs`):
+  `cost = distance × (1 + CongestionWeight × NodeCongestion(to))`. Cost ≥ distance, so the Euclidean
+  heuristic stays admissible and paths stay optimal under the cost.
+- **`ActiveEdgeCost`** = `CongestionCost.Default` when `CongestionAwareRouting`, else `null`
+  (= `DistanceCost`). Used by `CarSpawner.DrawSpawn`, `CarAI.ReplanRoute`, and
+  `CarAI.TrySetDestination`.
+- **Periodic replan**: with routing on, each routed car re-plans every ~4 s, staggered by instance id
+  (`(id & 0xF) × 0.25 s`) — no RNG, so reproducible demand is untouched. EMA + stagger + a moderate
+  default weight (2) damp oscillation. Toggle + weight live in the panel; watch routes bend around
+  jams with route gizmos on. This is the tool for "fix congestion by adding/removing roads": rebuild
+  the network, compare throughput/avg-speed with routing on.
+
+## 16. Car selection & inspector (`CarSelectionController`)
+
+Left-click a car → **select** it: cyan tint (top of `UpdateBodyColor`'s priority: selected > stalled
+> profile tint > speed), a cyan route `LineRenderer` (material via `RoadRenderer`'s primitive-clone
+pattern, no `Shader.Find`), and a **Selected Car** inspector window. With a car selected, left-click
+anywhere on a road → the ground point (math-plane y=0, no collider dependency) → `NearestNode` →
+`CarAI.TrySetDestination` (pathfinds with `ActiveEdgeCost`; random-walk cars gain a destination and
+then arrive/despawn). Esc deselects; selection auto-clears if the car despawns.
+
+Inspector shows driver/origin/destination/trip-time and exposes **live** current speed
+(`SetCurrentSpeed`, a nudge the P-controller then follows) and max speed sliders, plus Break down /
+Repair, and **Delete car** (deselect then `Despawn` — not counted as an arrival). Clicks over either
+IMGUI window are ignored (rect guards). `CameraController` uses only the right mouse button, so
+left-click never conflicts.

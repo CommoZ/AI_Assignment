@@ -19,6 +19,36 @@ public class TrafficSimulationManager : MonoBehaviour
     [Range(0f, 4f)] public float timeScale = 1f;
     public bool paused;
 
+    [Header("Scenario")]
+    [Tooltip("Seed for reproducible demand (origins, destinations, driver rolls). Applied on Start and on 'Restart scenario'.")]
+    public int randomSeed = 12345;
+
+    // ---- Global environment conditions (read by CarAI / CarSpawner; defaults are no-ops) ----
+    /// <summary>Road grip 0.5..1 (weather). Scales effective braking + traction. 1 = dry road.</summary>
+    public static float RoadGrip = 1f;
+    /// <summary>Global speed cap in m/s, or 0 for no limit.</summary>
+    public static float GlobalSpeedLimit = 0f;
+    /// <summary>Spawn-rate multiplier (rush-hour surge). 1 = normal.</summary>
+    public static float DemandMultiplier = 1f;
+
+    // ---- Congestion-aware routing ----
+    /// <summary>When true, cars route with <see cref="CongestionCost"/> so they avoid busy roads.</summary>
+    public static bool CongestionAwareRouting = false;
+    /// <summary>How strongly congestion inflates edge cost (0 = ignore, higher = detour harder).</summary>
+    public static float CongestionWeight = 2f;
+    // Smoothed count of cars currently heading to each node (the "weighted road nodes").
+    private static readonly Dictionary<Waypoint, float> congestion = new Dictionary<Waypoint, float>();
+
+    /// <summary>Smoothed congestion at a node (roughly the number of cars targeting it). 0 if unknown.</summary>
+    public static float NodeCongestion(Waypoint w)
+    {
+        if (w == null) return 0f;
+        return congestion.TryGetValue(w, out float c) ? c : 0f;
+    }
+
+    /// <summary>The edge cost cars should plan with right now: congestion-aware or plain distance.</summary>
+    public static IEdgeCost ActiveEdgeCost => CongestionAwareRouting ? CongestionCost.Default : null;
+
     private static readonly List<CarAI> cars = new List<CarAI>();
 
     // Every Waypoint registers here (see Waypoint.OnEnable). This is the routing graph's node set.
@@ -35,12 +65,50 @@ public class TrafficSimulationManager : MonoBehaviour
     /// <summary>Called by a car when it collides with another (deduplicated to one per pair).</summary>
     public static void ReportCollision() { totalCollisions++; }
 
-    // Cumulative-collision samples over the run, for the live graph.
-    private readonly List<int> collisionHistory = new List<int>();
+    // ---- Trip / throughput metrics ----
+    private static int completedTrips;
+    private static double tripTimeSum;
+    // Sim-time stamps of recent arrivals, pruned to a 60 s window -> throughput = count = cars/min.
+    private static readonly Queue<float> arrivalTimes = new Queue<float>();
+    private const float ThroughputWindow = 60f;
+
+    public int CompletedTrips => completedTrips;
+    public float AverageTripTime => completedTrips > 0 ? (float)(tripTimeSum / completedTrips) : 0f;
+
+    /// <summary>Cars that reached their destination in the last 60 s of sim time (cars/min).</summary>
+    public float ThroughputPerMin { get { PruneArrivals(); return arrivalTimes.Count; } }
+
+    /// <summary>Called by a car when it reaches its destination. tripTime is sim seconds start->finish.</summary>
+    public static void ReportArrival(float tripTime)
+    {
+        completedTrips++;
+        tripTimeSum += tripTime;
+        arrivalTimes.Enqueue(Time.time);
+    }
+
+    private static void PruneArrivals()
+    {
+        float cutoff = Time.time - ThroughputWindow;
+        while (arrivalTimes.Count > 0 && arrivalTimes.Peek() < cutoff) arrivalTimes.Dequeue();
+    }
+
+    // ---- Time-series samples (once a second) for the live graphs + CSV export ----
+    public struct Sample
+    {
+        public float t;            // sim time
+        public int cars;
+        public float avgSpeed;
+        public float stoppedFrac;  // 0..1
+        public float frustration;  // 0..1
+        public float throughput;   // cars/min
+        public int collisions;     // cumulative
+        public int trips;          // cumulative completed
+    }
+    private readonly List<Sample> samples = new List<Sample>();
     private float sampleTimer;
     private const float SampleInterval = 1f;
     private const int MaxSamples = 180;
-    public IReadOnlyList<int> CollisionHistory => collisionHistory;
+    public IReadOnlyList<Sample> Samples => samples;
 
     // ---- Intersection reservations (used by Perfect mode instead of traffic lights) ----
     /// <summary>One car's trajectory (entry->exit) through a junction, plus its distance to entry.</summary>
@@ -104,29 +172,121 @@ public class TrafficSimulationManager : MonoBehaviour
         Instance = this;
     }
 
+    private void Start()
+    {
+        // Seed the shared RNG so the run's demand + driver rolls are reproducible for a given seed.
+        Random.InitState(randomSeed);
+    }
+
     private void Update()
     {
         Time.timeScale = paused ? 0f : timeScale;
 
-        // Sample cumulative collisions once a second for the graph (skip while paused).
+        // Sample the live metrics once a second for the graphs / CSV (skip while paused).
         if (!paused)
         {
             sampleTimer += Time.unscaledDeltaTime;
             if (sampleTimer >= SampleInterval)
             {
                 sampleTimer = 0f;
-                collisionHistory.Add(totalCollisions);
-                if (collisionHistory.Count > MaxSamples) collisionHistory.RemoveAt(0);
+                UpdateCongestionMap();
+                samples.Add(new Sample
+                {
+                    t           = Time.time,
+                    cars        = cars.Count,
+                    avgSpeed    = AverageSpeed,
+                    stoppedFrac = StoppedFraction,
+                    frustration = AverageFrustration,
+                    throughput  = ThroughputPerMin,
+                    collisions  = totalCollisions,
+                    trips       = completedTrips,
+                });
+                if (samples.Count > MaxSamples) samples.RemoveAt(0);
             }
         }
     }
 
-    /// <summary>Reset the collision counter and its history graph.</summary>
+    // Scratch buffers reused each tick so the congestion update allocates nothing.
+    private static readonly Dictionary<Waypoint, int> congestionCounts = new Dictionary<Waypoint, int>();
+    private static readonly List<Waypoint> congestionScratch = new List<Waypoint>();
+
+    /// <summary>
+    /// Rebuild the smoothed congestion map: count cars heading to each node, then EMA toward that
+    /// count (so weights ramp/decay smoothly rather than flicker) and drop nodes that have emptied.
+    /// </summary>
+    private static void UpdateCongestionMap()
+    {
+        congestionCounts.Clear();
+        foreach (var c in cars)
+        {
+            if (c == null || c.currentTarget == null) continue;
+            congestionCounts.TryGetValue(c.currentTarget, out int n);
+            congestionCounts[c.currentTarget] = n + 1;
+        }
+
+        // Snapshot the set of nodes to touch (current smoothed entries + newly counted ones) so we
+        // can safely add/remove dictionary entries while updating.
+        congestionScratch.Clear();
+        foreach (var k in congestion.Keys) congestionScratch.Add(k);
+        foreach (var k in congestionCounts.Keys) if (!congestion.ContainsKey(k)) congestionScratch.Add(k);
+
+        for (int i = 0; i < congestionScratch.Count; i++)
+        {
+            Waypoint k = congestionScratch[i];
+            congestionCounts.TryGetValue(k, out int target);
+            congestion.TryGetValue(k, out float prev);
+            float v = Mathf.Lerp(prev, target, 0.4f);
+            if (target == 0 && v < 0.05f) congestion.Remove(k);
+            else congestion[k] = v;
+        }
+    }
+
+    /// <summary>Reset the collision counter and clear the metric graphs.</summary>
     public void ResetCollisions()
     {
         totalCollisions = 0;
-        collisionHistory.Clear();
+        samples.Clear();
         sampleTimer = 0f;
+    }
+
+    /// <summary>Wipe every run metric (collisions, trips, throughput, graphs). Used by Restart scenario.</summary>
+    public void ResetMetrics()
+    {
+        totalCollisions = 0;
+        completedTrips = 0;
+        tripTimeSum = 0;
+        arrivalTimes.Clear();
+        samples.Clear();
+        congestion.Clear();
+        sampleTimer = 0f;
+    }
+
+    /// <summary>
+    /// Restart the scenario deterministically: re-seed the RNG, clear cars, reset every metric, and
+    /// reset each spawner's demand state so the exact same demand sequence replays for a given seed.
+    /// </summary>
+    public void RestartScenario()
+    {
+        ClearAllCars();
+        ResetMetrics();
+        Random.InitState(randomSeed);
+        foreach (var s in FindObjectsByType<CarSpawner>(FindObjectsSortMode.None))
+            if (s != null) s.ResetScenarioState(randomSeed);
+    }
+
+    /// <summary>Write the sampled metric time-series to a CSV in persistentDataPath; returns the path.</summary>
+    public string ExportCsv()
+    {
+        string path = System.IO.Path.Combine(Application.persistentDataPath,
+            $"traffic_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv");
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("time,cars,avgSpeed,stoppedPct,frustrationPct,throughputPerMin,collisions,completedTrips");
+        foreach (var s in samples)
+            sb.AppendLine($"{s.t:0.0},{s.cars},{s.avgSpeed:0.00},{s.stoppedFrac * 100f:0.0}," +
+                          $"{s.frustration * 100f:0.0},{s.throughput:0.0},{s.collisions},{s.trips}");
+        System.IO.File.WriteAllText(path, sb.ToString());
+        Debug.Log($"Traffic metrics exported to: {path}");
+        return path;
     }
 
     private void OnDestroy()
@@ -158,6 +318,34 @@ public class TrafficSimulationManager : MonoBehaviour
     public static void ApplyProfileToAll(DriverProfile p)
     {
         foreach (var c in cars) if (c != null) c.SetProfile(p);
+    }
+
+    // ---- Incidents (breakdowns) ----
+    // Dedicated RNG so the "break down random car" button perturbs neither UnityEngine.Random nor
+    // the spawner's demand stream.
+    private static System.Random incidentRng;
+
+    /// <summary>How many live cars are currently broken down.</summary>
+    public static int StalledCount
+    {
+        get { int n = 0; foreach (var c in cars) if (c != null && c.Stalled) n++; return n; }
+    }
+
+    /// <summary>Break down a random currently-moving car. Returns false if there was none.</summary>
+    public static bool StallRandomCar()
+    {
+        incidentRng ??= new System.Random();
+        var candidates = new List<CarAI>();
+        foreach (var c in cars) if (c != null && !c.Stalled) candidates.Add(c);
+        if (candidates.Count == 0) return false;
+        candidates[incidentRng.Next(candidates.Count)].StallFor(0f); // 0 = until cleared
+        return true;
+    }
+
+    /// <summary>Clear every breakdown so all cars resume driving.</summary>
+    public static void ClearAllStalls()
+    {
+        foreach (var c in cars) if (c != null && c.Stalled) c.ClearStall();
     }
 
     /// <summary>Re-roll every live car's profile from a population (used when leaving Perfect mode).</summary>

@@ -8,6 +8,18 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/CircleTraffic.unity
     guid: 99c9720ab356a0642a771bea13969a05
+  - enabled: 1
+    path: Assets/Scenes/City.unity
+    guid: 4c07dfc5176994a4cb55579cd4cfc9d4
+  - enabled: 1
+    path: Assets/Scenes/Junctions.unity
+    guid: 34a5fceb85af9c34eb201def49d613a8
+  - enabled: 1
+    path: Assets/Scenes/Highway.unity
+    guid: 2f24d345d5b382248b0e2e25ecddcdb8
+  - enabled: 1
+    path: Assets/Scenes/Ring.unity
+    guid: f280cedbe84b1e243b6a932511061427
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
   m_UseUCBPForAssetBundles: 0

@@ -31,7 +31,13 @@ public class DriverPopulation : ScriptableObject
     public DriverProfile perfectProfile;
 
     /// <summary>Pick an archetype: the override if set, otherwise a weighted-random entry.</summary>
-    public DriverProfile PickWeighted()
+    public DriverProfile PickWeighted() => PickWeighted(null);
+
+    /// <summary>
+    /// Weighted archetype pick. Pass a <see cref="System.Random"/> to draw from a reproducible
+    /// stream (used by the spawner for deterministic demand); null uses UnityEngine.Random.
+    /// </summary>
+    public DriverProfile PickWeighted(System.Random rng)
     {
         if (globalOverride != null) return globalOverride;
         if (entries == null || entries.Count == 0) return null;
@@ -48,7 +54,7 @@ public class DriverPopulation : ScriptableObject
             return null;
         }
 
-        float roll = Random.Range(0f, total);
+        float roll = rng != null ? (float)rng.NextDouble() * total : Random.Range(0f, total);
         for (int i = 0; i < entries.Count; i++)
         {
             if (entries[i].profile == null) continue;

@@ -12,7 +12,11 @@ Companion to **[ARCHITECTURE.md](ARCHITECTURE.md)** (the "how it works" referenc
   IMGUI `SimulationUI`, gizmo settings. Random-walk routing.
 - **Iter 2 (base, authored but disconnected):** `DriverProfile` / `DriverPopulation` existed with
   full behaviour math but **nothing consumed them** — zero runtime effect.
-- **Iter 2-wiring → 4 (this work):** everything below.
+- **Iter 2-wiring → 4:** driver profiles wired in, road types + right-of-way, city + GPS routing.
+- **Iter 5:** Environment & Scenarios update — env knobs, seeded/patterned demand, incidents,
+  throughput/trip-time metrics + CSV.
+- **Iter 6 (this work):** congestion-aware routing, car selection/inspector, highway + ring scenes.
+  See below.
 
 ---
 
@@ -67,6 +71,69 @@ Final design = **conflict-aware intersection reservation** (see ARCHITECTURE §7
 
 Priority = closer-to-entry wins, ties by instance id → a strict total order → **no deadlock**.
 
+### Iteration 5 — Environment & Scenarios update
+Turned the sim from "watch random cars" into something you can actually run experiments on.
+- **Environment knobs** (`TrafficSimulationManager` statics, read by `CarAI`): `RoadGrip` (weather →
+  grip-scaled braking + traction), `GlobalSpeedLimit`, `DemandMultiplier` (rush-hour surge). Grip is
+  the interesting one — weaker brakes lengthen stopping distance and, because `SafeSpeed` uses the
+  grip-scaled brake, cars keep bigger gaps *for free*. The catch (caught in review): three hardcoded
+  horizons assumed dry grip, so low grip silently broke Perfect mode. Made them grip-aware
+  (reservation window `16/grip`, corner window `7/grip`, `cornerSpeed·√grip`) and floored grip at 0.5.
+- **Reproducible demand** — the old spawner used unseeded `UnityEngine.Random` for origins *and*
+  destinations, and `RandomNodeExcept` sent cars to arbitrary mid-street nodes. Replaced with an
+  isolated seeded `System.Random` on the spawner (draw OD+profile once per car, retry-not-reroll when
+  blocked, so physics/frame timing can't shift the draw order) + `RestartScenario` for deterministic
+  replay. Destinations now come only from real ports. `DemandPattern` = Uniform / Hotspot (downtown
+  sink) / Commuter (inbound⇄outbound phase), weighted by cached distance-from-centroid.
+- **Incidents** — click-to-stall (`IncidentController`, runtime-added) + break-down/clear buttons.
+  A stalled car blocks its lane; followers detour via `AvoidNodeCost : IEdgeCost` (the first real use
+  of the routing seam). In Perfect mode a stall releases its reservation unless committed in the core,
+  or it would freeze all cross-traffic.
+  - *Follow-up:* the graph detour alone left cars already on the blocked street trapped (single-lane,
+    no U-turn edges — no graph path exists from there). Added a **physical side-pass**: after ~1.5 s
+    stuck, a follower checks the side corridor is clear (incl. oncoming further out), then steers a
+    rolling offset point around the stall, ignoring it in the forward sensor (else `SafeSpeed` pins it
+    behind) and widening the arrival radius so offset-passed nodes still advance the route. Sensor
+    switched to `SphereCastAll` to support the ignore. Queues unwind one car at a time.
+- **Metrics** — throughput (arrivals/60 s of sim time), avg trip time, completed trips; a per-second
+  `Sample` buffer drives three live graphs (collisions / avg speed / throughput) and a **CSV export**
+  to `persistentDataPath`. Trip completion is counted only when `currentTarget == destination` (not
+  every dead-end).
+
+### Iteration 6 — Congestion routing, car inspector, highway & ring scenes
+Turns the sim into a traffic-engineering tool (add/remove roads, watch cars re-route, measure).
+- **Congestion-aware routing** — finally uses the `IEdgeCost` seam for its intended purpose. The
+  1 Hz sampler builds an EMA-smoothed map of cars-per-target-node (`NodeCongestion`); `CongestionCost`
+  = `distance × (1 + weight × congestion)` (stays ≥ distance → heuristic still admissible). Cars plan
+  with `ActiveEdgeCost` (spawn, `ReplanRoute`, `TrySetDestination`) and re-plan every ~4 s **staggered
+  by instance id** (no RNG → reproducible demand intact). EMA + stagger + moderate default weight damp
+  route oscillation. This is the A/B tool: same seed, routing off vs on → compare throughput/avg speed.
+- **Car selection & inspector** — replaced click-to-stall (`IncidentController` deleted) with
+  `CarSelectionController`: left-click selects (cyan tint + route LineRenderer + inspector window),
+  left-click a road re-routes the selected car (ground via math-plane y=0 → `NearestNode` →
+  `TrySetDestination`), Esc deselects. Inspector edits current/max speed live and has break-down/repair.
+  Selected tint sits atop the `UpdateBodyColor` priority. Breakdowns now come from buttons, not clicks.
+- **New scenes** — `Generate Highway Scene` (long 3-lane `MultiLaneRoadBuilder` + on-ramp merge /
+  off-ramp diverge, wired with direct `LinkTo(NearestWaypoint(...))` edges since the road builder
+  places no connectors; two spawners) and `Generate Ring Scene` (single-lane `CircleTrackBuilder`
+  closed loop, no despawn → density set by Max cars → **phantom stop-and-go jams**, especially after a
+  brief breakdown). Builders don't auto-rebuild at runtime, so the manual ramp edges persist in the
+  saved scene.
+  - *Follow-up (merge deadlock):* the first on-ramp ended **exactly on** a highway node (collision
+    knot) and kept its `isYield`, whose "any car within 4 m" check never clears against continuous
+    highway flow → permanent gridlock at the merge. Fixed by ending the ramp just outside the lane,
+    linking to a node a little **downstream** (cars merge moving forward), and clearing `isYield` so
+    it zippers in via car-following. Roundabouts keep their yield (perpendicular cross traffic, where
+    the zone check is right). **Re-generate the Highway scene** to pick this up.
+  - *Follow-up (corner wedges):* after a collision shoved a car past a corner node, it tried to
+    U-turn back to the now-behind node and wedged against the queue. Fixed with (a) an **overshoot
+    advance** — if the car is past the plane through the node along the leg it drove in on, advance
+    instead of doubling back (position-based, robust to the car being spun); and (b) a gated
+    **stuck-recovery** — a car stopped >4 s with clear road ahead (front of a wedge) skips to the
+    next node to free the queue. Recovery is suppressed for legitimate stops (car close ahead, red
+    light/yield, breakdown, or waiting on a Perfect-mode reservation) so it never runs a light or
+    breaks the collision-free guarantee.
+
 ### Collision instrumentation
 `TrafficSimulationManager` counts collisions (deduped per pair by id) and samples a cumulative
 history; `SimulationUI` draws it as a live bar-graph with a Reset. This is the objective check
@@ -103,7 +170,12 @@ that Perfect mode is collision-free.
   collision-free, but not "main road always wins."
 - **Roundabout/ramp** get less testing than the city grid; reservation zones are added at 4-way
   and city intersections, not roundabouts (those rely on `isYield`).
-- **No data export** — metrics are live-only (no CSV/time-series dump).
+- **Data export** — done (per-second CSV to `persistentDataPath`); only the sampled series, not
+  per-car traces.
+- **Congestion-aware rerouting** — done (`CongestionCost` from the live EMA density map, periodic
+  staggered replan). Weight/oscillation are tuned by feel, not calibrated against real flow data.
+- **Reproducibility** covers the demand sequence + archetype mix, not exact car positions (Unity
+  physics isn't bit-identical). Per-car reaction-time rolls still use `UnityEngine.Random`.
 - Road mesh draws one quad per lane edge (opposing lanes = two strips, junctions = filled patch);
   no lane markings.
 

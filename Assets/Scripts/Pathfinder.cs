@@ -21,6 +21,41 @@ public class DistanceCost : IEdgeCost
 }
 
 /// <summary>
+/// Distance cost, but edges leading into <see cref="blocked"/> are made hugely expensive so the
+/// path routes around it if any alternative exists (used to detour around a broken-down car). If
+/// the blocked node is the only way through, a finite-but-costly path is still returned.
+/// </summary>
+public class AvoidNodeCost : IEdgeCost
+{
+    private readonly Waypoint blocked;
+    private const float Penalty = 100000f;
+    public AvoidNodeCost(Waypoint blocked) { this.blocked = blocked; }
+    public float Cost(Waypoint from, Waypoint to)
+    {
+        float d = Vector3.Distance(from.transform.position, to.transform.position);
+        return to == blocked ? d + Penalty : d;
+    }
+}
+
+/// <summary>
+/// Travel-cost that grows with live congestion at the destination node: a busy road costs more, so
+/// A* naturally routes cars around jams (the "cars react to traffic" model). The congestion figure
+/// comes from <see cref="TrafficSimulationManager.NodeCongestion"/> (a smoothed count of cars
+/// heading to each node); the multiplier is <see cref="TrafficSimulationManager.CongestionWeight"/>.
+/// Cost stays &gt;= physical distance, so the Euclidean heuristic in <see cref="Pathfinder"/> remains
+/// admissible and the returned path is still optimal under this cost.
+/// </summary>
+public class CongestionCost : IEdgeCost
+{
+    public static readonly CongestionCost Default = new CongestionCost();
+    public float Cost(Waypoint from, Waypoint to)
+    {
+        float d = Vector3.Distance(from.transform.position, to.transform.position);
+        return d * (1f + TrafficSimulationManager.CongestionWeight * TrafficSimulationManager.NodeCongestion(to));
+    }
+}
+
+/// <summary>
 /// Bidirectional A* over the <see cref="Waypoint"/> graph.
 ///
 /// Two A* searches run at once — one forward from <c>start</c> along <see cref="Waypoint.nextWaypoints"/>,

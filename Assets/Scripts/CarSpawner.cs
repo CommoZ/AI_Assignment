@@ -1,16 +1,31 @@
 using System.Collections.Generic;
 using UnityEngine;
 
+/// <summary>Origin/destination demand pattern the spawner draws each car from.</summary>
+public enum DemandPattern
+{
+    Uniform,  // origins and destinations uniformly random over the ports
+    Hotspot,  // destinations biased toward a "downtown" (the centre of the network)
+    Commuter, // rush-hour flow: inbound = edges->centre, outbound = centre->edges (phase toggled live)
+}
+
 /// <summary>
-/// Spawns car prefabs at one of several spawn waypoints at a configurable rate.
-/// A global cap (from <see cref="TrafficSimulationManager"/>) prevents runaway spawning.
+/// Spawns car prefabs at spawn waypoints at a configurable rate, drawing each car's origin,
+/// destination and driver archetype from a <b>seeded RNG</b> so a scenario is reproducible for a
+/// given seed. A global cap (<see cref="TrafficSimulationManager.maxCars"/>) prevents runaway
+/// spawning, and <see cref="TrafficSimulationManager.DemandMultiplier"/> scales the rate (rush hour).
+///
+/// Reproducibility: origin/destination/profile are drawn once per car from an isolated
+/// <see cref="System.Random"/> stream (not <c>UnityEngine.Random</c>, whose consumption order is
+/// entangled with physics and frame timing). If a drawn origin is momentarily blocked, the same
+/// draw is retried on a later tick rather than re-rolled, so the draw sequence never shifts.
 /// </summary>
 public class CarSpawner : MonoBehaviour
 {
     [Tooltip("Prefab that has a CarAI component on it.")]
     public CarAI carPrefab;
 
-    [Tooltip("Possible starting waypoints. A random one is chosen for each spawn.")]
+    [Tooltip("Possible starting waypoints (intersection departure ports). Also the destination pool.")]
     public List<Waypoint> spawnPoints = new List<Waypoint>();
 
     [Tooltip("Seconds between spawn attempts.")]
@@ -24,32 +39,228 @@ public class CarSpawner : MonoBehaviour
     public DriverPopulation population;
 
     [Header("GPS routing")]
-    [Tooltip("If ticked, each car is given a random destination and drives a shortest path (bidirectional A*) to it, then despawns on arrival. Off = the car random-walks the graph (ring / highway scenes).")]
+    [Tooltip("If ticked, each car is given a destination and drives a shortest path (bidirectional A*) to it, then despawns on arrival. Off = the car random-walks the graph (ring / highway scenes).")]
     public bool assignDestinations = false;
 
+    [Tooltip("How origins/destinations are chosen (only used when Assign Destinations is on).")]
+    public DemandPattern demandPattern = DemandPattern.Uniform;
+
+    [Tooltip("Commuter phase: true = morning inbound (edges->centre), false = evening outbound (centre->edges). Toggled live from the UI.")]
+    [HideInInspector] public bool inboundPhase = true;
+
     private float timer;
+
+    // Reproducible demand stream (seeded from the manager). Isolated from UnityEngine.Random.
+    private System.Random rng;
+
+    // A drawn-but-not-yet-placed car, kept across blocked ticks so the draw order stays stable.
+    private class PendingSpawn { public Waypoint origin, dest; public List<Waypoint> route; public DriverProfile profile; }
+    private PendingSpawn pending;
+
+    // Cached demand geometry (centroid of spawnPoints + each port's 0..1 distance from it).
+    private Vector3 demandCenter;
+    private float[] portNorm;
+
+    private void Start()
+    {
+        var mgr = TrafficSimulationManager.Instance;
+        rng = new System.Random(mgr != null ? mgr.randomSeed : 0);
+        RefreshDemandCache();
+    }
 
     private void Update()
     {
         if (carPrefab == null || spawnPoints.Count == 0) return;
+        if (rng == null) rng = new System.Random(TrafficSimulationManager.Instance != null
+                                                  ? TrafficSimulationManager.Instance.randomSeed : 0);
+        EnsureCache();
 
+        // Rush-hour surge scales the effective rate.
+        float interval = spawnInterval / Mathf.Max(0.01f, TrafficSimulationManager.DemandMultiplier);
         timer += Time.deltaTime;
-        if (timer < spawnInterval) return;
+        if (timer < interval) return;
         timer = 0f;
 
         var mgr = TrafficSimulationManager.Instance;
         if (mgr != null && mgr.CarCount >= mgr.maxCars) return;
 
-        // Try a few random spawn points until we find one whose vicinity has no other car.
-        for (int attempt = 0; attempt < 4; attempt++)
-        {
-            Waypoint sp = spawnPoints[Random.Range(0, spawnPoints.Count)];
-            if (sp == null) continue;
-            if (IsBlockedByCar(sp.transform.position)) continue;
+        // Draw the next car once; retry placement on later ticks if its origin is blocked.
+        if (pending == null) pending = DrawSpawn();
+        if (pending == null) return;
 
-            SpawnAt(sp);
-            return;
+        if (IsBlockedByCar(pending.origin.transform.position)) return; // keep the draw, retry next tick
+        SpawnPending();
+        pending = null;
+    }
+
+    /// <summary>Draw a car's origin/destination/route/profile from the seeded RNG (no placement yet).</summary>
+    private PendingSpawn DrawSpawn()
+    {
+        Waypoint origin = PickOrigin();
+        if (origin == null) return null;
+
+        Waypoint dest = null;
+        List<Waypoint> route = null;
+        if (assignDestinations)
+        {
+            dest = PickDestination(origin);
+            if (dest == null) return null;
+            route = Pathfinder.FindPath(origin, dest, TrafficSimulationManager.ActiveEdgeCost);
+            if (route == null || route.Count < 2) return null; // unreachable: skip this draw
         }
+
+        DriverProfile profile = population != null ? population.PickWeighted(rng) : null;
+        return new PendingSpawn { origin = origin, dest = dest, route = route, profile = profile };
+    }
+
+    /// <summary>Instantiate the queued car and wire up its route/profile.</summary>
+    private void SpawnPending()
+    {
+        Waypoint sp = pending.origin;
+        Vector3 pos = sp.transform.position;
+        Waypoint next = pending.route != null ? pending.route[1] : sp.GetRandomNext();
+
+        Quaternion rot = sp.transform.rotation;
+        if (next != null)
+        {
+            Vector3 dir = next.transform.position - pos;
+            dir.y = 0f;
+            if (dir.sqrMagnitude > 0.001f) rot = Quaternion.LookRotation(dir.normalized, Vector3.up);
+        }
+
+        CarAI car = Instantiate(carPrefab, pos, rot);
+        car.currentTarget = next != null ? next : sp;
+        car.originNode = sp;
+
+        if (pending.route != null)
+        {
+            car.route = pending.route;
+            car.destination = pending.dest;
+        }
+
+        if (pending.profile != null)
+        {
+            car.profile = pending.profile;
+            car.maxSpeed *= pending.profile.RollSpeedFactor(rng);
+        }
+    }
+
+    // ---- Demand selection ----
+
+    private Waypoint PickOrigin()
+    {
+        // Commuter biases where cars *appear*; other patterns spawn uniformly.
+        if (assignDestinations && demandPattern == DemandPattern.Commuter)
+            return PickWeightedPort(towardCenter: !inboundPhase, except: null);
+        for (int i = 0; i < 8; i++)
+        {
+            Waypoint w = spawnPoints[rng.Next(spawnPoints.Count)];
+            if (w != null) return w;
+        }
+        return FirstOtherPort(null);
+    }
+
+    private Waypoint PickDestination(Waypoint origin)
+    {
+        switch (demandPattern)
+        {
+            case DemandPattern.Hotspot:
+                return PickWeightedPort(towardCenter: true, except: origin);
+            case DemandPattern.Commuter:
+                return PickWeightedPort(towardCenter: inboundPhase, except: origin);
+            default: // Uniform
+                return PickUniformPort(except: origin);
+        }
+    }
+
+    private Waypoint PickUniformPort(Waypoint except)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            Waypoint w = spawnPoints[rng.Next(spawnPoints.Count)];
+            if (w != null && w != except) return w;
+        }
+        return except == null ? null : FirstOtherPort(except);
+    }
+
+    /// <summary>
+    /// Weighted pick over the ports by distance from the network centre: toward the centre
+    /// (downtown sink) or toward the edges. Weight is sharpened (squared) with a small floor so no
+    /// port is impossible.
+    /// </summary>
+    private Waypoint PickWeightedPort(bool towardCenter, Waypoint except)
+    {
+        if (portNorm == null || portNorm.Length != spawnPoints.Count) RefreshDemandCache();
+
+        float total = 0f;
+        for (int i = 0; i < spawnPoints.Count; i++)
+        {
+            Waypoint sp = spawnPoints[i];
+            if (sp == null || sp == except) continue;
+            total += PortWeight(i, towardCenter);
+        }
+        if (total <= 0f) return PickUniformPort(except);
+
+        float roll = (float)rng.NextDouble() * total;
+        for (int i = 0; i < spawnPoints.Count; i++)
+        {
+            Waypoint sp = spawnPoints[i];
+            if (sp == null || sp == except) continue;
+            roll -= PortWeight(i, towardCenter);
+            if (roll <= 0f) return sp;
+        }
+        return FirstOtherPort(except);
+    }
+
+    private float PortWeight(int i, bool towardCenter)
+    {
+        float dn = portNorm[i];                 // 0 = centre, 1 = edge
+        float w = towardCenter ? (1f - dn) : dn;
+        return w * w + 0.05f;                   // sharpen + floor
+    }
+
+    private Waypoint FirstOtherPort(Waypoint except)
+    {
+        for (int i = 0; i < spawnPoints.Count; i++)
+            if (spawnPoints[i] != null && spawnPoints[i] != except) return spawnPoints[i];
+        return null;
+    }
+
+    private void EnsureCache()
+    {
+        if (portNorm == null || portNorm.Length != spawnPoints.Count) RefreshDemandCache();
+    }
+
+    /// <summary>
+    /// Recompute the demand centre (centroid of the spawn ports) and each port's normalised
+    /// distance from it. Call after <see cref="spawnPoints"/> is reassigned (e.g. city rebuild).
+    /// </summary>
+    public void RefreshDemandCache()
+    {
+        int n = spawnPoints.Count;
+        portNorm = new float[n];
+        if (n == 0) return;
+
+        Vector3 sum = Vector3.zero;
+        int valid = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (spawnPoints[i] == null) continue;
+            sum += spawnPoints[i].transform.position;
+            valid++;
+        }
+        demandCenter = valid > 0 ? sum / valid : Vector3.zero;
+
+        float maxD = 0f;
+        var raw = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            if (spawnPoints[i] == null) { raw[i] = 0f; continue; }
+            Vector3 d = spawnPoints[i].transform.position - demandCenter; d.y = 0f;
+            raw[i] = d.magnitude;
+            if (raw[i] > maxD) maxD = raw[i];
+        }
+        for (int i = 0; i < n; i++) portNorm[i] = maxD > 0.001f ? raw[i] / maxD : 0f;
     }
 
     private bool IsBlockedByCar(Vector3 position)
@@ -63,58 +274,23 @@ public class CarSpawner : MonoBehaviour
         return false;
     }
 
-    private void SpawnAt(Waypoint sp)
-    {
-        Vector3 pos = sp.transform.position;
-
-        // Decide the first hop: along a planned route if we're doing GPS, else a random successor.
-        List<Waypoint> plannedRoute = null;
-        Waypoint destination = null;
-        if (assignDestinations)
-        {
-            destination = TrafficSimulationManager.RandomNodeExcept(sp);
-            if (destination != null)
-            {
-                plannedRoute = Pathfinder.FindPath(sp, destination, null);
-                if (plannedRoute == null || plannedRoute.Count < 2) return; // no route: skip this spawn
-            }
-        }
-
-        Waypoint next = plannedRoute != null ? plannedRoute[1] : sp.GetRandomNext();
-
-        Quaternion rot = sp.transform.rotation;
-        if (next != null)
-        {
-            Vector3 dir = next.transform.position - pos;
-            dir.y = 0f;
-            if (dir.sqrMagnitude > 0.001f) rot = Quaternion.LookRotation(dir.normalized, Vector3.up);
-        }
-
-        CarAI car = Instantiate(carPrefab, pos, rot);
-        car.currentTarget = next != null ? next : sp;
-
-        // Route / destination.
-        if (plannedRoute != null)
-        {
-            car.route = plannedRoute;
-            car.destination = destination;
-        }
-
-        // Driver personality: pick an archetype and roll this car's top speed from it.
-        if (population != null)
-        {
-            DriverProfile p = population.PickWeighted();
-            if (p != null)
-            {
-                car.profile = p;
-                car.maxSpeed *= p.RollSpeedFactor();
-            }
-        }
-    }
-
     /// <summary>Change spawn rate at runtime (used by UI).</summary>
     public void SetSpawnInterval(float seconds)
     {
         spawnInterval = Mathf.Max(0.05f, seconds);
+    }
+
+    /// <summary>
+    /// Reset this spawner to the start of a scenario: re-seed the demand RNG, clear the spawn timer
+    /// and any queued draw, reset the commuter phase, and rebuild the demand cache. Called by
+    /// <see cref="TrafficSimulationManager.RestartScenario"/>.
+    /// </summary>
+    public void ResetScenarioState(int seed)
+    {
+        rng = new System.Random(seed);
+        timer = 0f;
+        pending = null;
+        inboundPhase = true;
+        RefreshDemandCache();
     }
 }
