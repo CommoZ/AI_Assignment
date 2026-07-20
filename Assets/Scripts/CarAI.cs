@@ -96,11 +96,13 @@ public class CarAI : MonoBehaviour
     [Tooltip("If true, when a SLOWER car is detected ahead the car may retarget to a faster/clear lane neighbour.")]
     public bool enableLaneChanges = true;
     [Tooltip("Seconds that must pass between two lane changes on the same car.")]
-    public float laneChangeCooldown = 2f;
+    public float laneChangeCooldown = 6f;
     [Tooltip("A car ahead counts as 'slower' only if it is at least this much slower than my current speed (m/s).")]
-    public float overtakeSpeedMargin = 1.5f;
+    public float overtakeSpeedMargin = 3f;
     [Tooltip("Radius around a candidate lane-neighbour that must be clear of other cars before moving there.")]
-    public float laneChangeClearRadius = 2.5f;
+    public float laneChangeClearRadius = 3.5f;
+    [Tooltip("How far behind the target lane-slot to scan for a car closing from the rear before merging (m).")]
+    public float laneChangeRearGap = 9f;
 
     [Header("Following")]
     [Tooltip("Minimum bumper-to-bumper gap (m) the car keeps to whatever is ahead. Scaled by the driver's follow-gap trait.")]
@@ -118,7 +120,9 @@ public class CarAI : MonoBehaviour
     [Tooltip("If true, a car stuck behind a broken-down car pulls around it when the side is clear (works on single-lane streets, unlike overtaking).")]
     public bool enableStallPass = true;
     [Tooltip("Lateral offset (m) used to steer around a broken-down car — roughly one lane width.")]
-    public float passOffset = 2.2f;
+    public float passOffset = 2.4f;
+    [Tooltip("Speed cap (m/s) while steering around a breakdown — a slow creep so there's time to swing wide before drawing level with it.")]
+    public float passSpeed = 3.5f;
 
     // Runtime
     private Rigidbody rb;
@@ -149,10 +153,11 @@ public class CarAI : MonoBehaviour
     private float spawnTime;       // sim time this car entered the sim (for the trip-time metric)
     private static readonly Color StalledColor = new Color(0.12f, 0.12f, 0.14f);
     private static readonly Color SelectedColor = new Color(0.1f, 0.9f, 1f);
+    private static readonly Color JamColor = new Color(0.5f, 0.5f, 0.52f); // stationary-in-traffic grey
     private const float DetourDelay = 3f;     // stuck this long behind a stall -> try to reroute
     private const float ReplanInterval = 4f;  // congestion-aware re-plan cadence (staggered per car)
     private const float DetourCooldown = 6f;  // min seconds between reroute attempts
-    private const float PassDelay = 1.5f;     // stuck this long behind a stall -> try to pull around it
+    private const float PassDelay = 0.5f;     // stuck this long behind a stall -> try to pull around it
 
     // Pass-a-breakdown state: the stalled car being driven around, and which side we swung to.
     private CarAI passingCar;
@@ -237,8 +242,9 @@ public class CarAI : MonoBehaviour
             // Don't hold a junction reserved while broken down (unless physically inside the core),
             // or every crossing car would yield forever to a car that will never move.
             if (!crossingCommitted) ReleaseZone();
-            currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, braking * dt);
-            ApplyDriveForces();
+            // Body is kinematic while stalled (set in StallFor), so it holds position on its own —
+            // no drive forces needed, and applying them to a kinematic body is a no-op anyway.
+            currentSpeed = 0f;
             UpdateBodyColor();
             return;
         }
@@ -323,8 +329,12 @@ public class CarAI : MonoBehaviour
         //    breakdown, the stalled car itself is ignored (we're steering around it, not through it).
         bool stuckBehindStall = false;
         bool carCloseAhead = false;
+        // Only stop treating the stalled car as an obstacle once we've swung clear of its width;
+        // until then keep sensing it so we brake and creep around rather than accelerate into it.
+        bool clearOfStallWidth = passing && PassLateralOffset() > 1.6f;
+        CarAI ignoreWhilePassing = clearOfStallWidth ? passingCar : null;
         if (SenseCarAhead(effSensorLength, out float hitDistance, out CarAI carAhead,
-                          passing ? passingCar : null))
+                          ignoreWhilePassing))
         {
             float leadSpeed = carAhead != null ? carAhead.CurrentSpeed : 0f;
             rawTargetSpeed = Mathf.Min(rawTargetSpeed, SafeSpeed(hitDistance - lag, leadSpeed, gapMul));
@@ -332,9 +342,13 @@ public class CarAI : MonoBehaviour
             // suppresses the stuck-recovery below so queued cars don't skip their waypoints.
             carCloseAhead = hitDistance < minFollowGap * gapMul + 2f;
 
-            // The car ahead is meaningfully SLOWER than I want to drive -> consider overtaking.
+            // Only overtake when GENUINELY held back: the car ahead is meaningfully slower AND close
+            // enough to actually be limiting me AND I've been dragged below my cruise speed by it.
+            // (Previously any marginally-slower car in sensor range triggered a lane change, so cars
+            // hopped lanes constantly and side-swiped each other.)
             bool aheadIsSlower = carAhead != null && carAhead.CurrentSpeed < cruiseSpeed - overtakeMargin;
-            if (enableLaneChanges && aheadIsSlower &&
+            bool actuallyBlocked = carCloseAhead && currentSpeed < cruiseSpeed - overtakeMargin;
+            if (enableLaneChanges && aheadIsSlower && actuallyBlocked &&
                 Time.time - lastLaneChangeTime > laneChangeCooldown)
             {
                 if (TryOvertake(carAhead.CurrentSpeed))
@@ -362,8 +376,9 @@ public class CarAI : MonoBehaviour
         }
         if (!stuckBehindStall) blockedTimer = 0f;
 
-        // Keep the pass manoeuvre gentle and controllable.
-        if (passing) rawTargetSpeed = Mathf.Min(rawTargetSpeed, cornerSpeed);
+        // Keep the pass manoeuvre a slow, controllable creep so the car has time to swing wide
+        // before it reaches the breakdown.
+        if (passing) rawTargetSpeed = Mathf.Min(rawTargetSpeed, passSpeed);
 
         // 5) Intersection reservation (Perfect / no-lights mode): claim a junction before entering
         //    so cross-traffic never collides. Replaces traffic lights when enabled.
@@ -696,6 +711,10 @@ public class CarAI : MonoBehaviour
         else if (profile != null && profile.useBodyColorTint)
         {
             c = profile.bodyColorTint;
+            // Cars stuck in traffic fade to grey so jams stand out at a glance: full archetype
+            // colour while flowing, grey once crawling below ~a third of their top speed.
+            float flow = maxSpeed > 0.01f ? Mathf.Clamp01(currentSpeed / (maxSpeed * 0.35f)) : 0f;
+            c = Color.Lerp(JamColor, c, flow);
         }
         else
         {
@@ -810,12 +829,29 @@ public class CarAI : MonoBehaviour
 
         Vector3 f = passingCar.transform.forward;
         Vector3 stallPos = passingCar.transform.position;
-        float myL = Vector3.Dot(transform.position - stallPos, f); // my progress along the corridor
+        Vector3 rel = transform.position - stallPos;
+        float myL = Vector3.Dot(rel, f);          // longitudinal progress (negative = still behind)
+        float myLat = Vector3.Dot(rel, passSide); // lateral offset already built toward the pass side
 
         if (myL > 3.5f) { passingCar = null; return false; }     // clear of it — rejoin the lane
 
-        passPoint = stallPos + f * (myL + 4f) + passSide * passOffset;
+        // Swing WIDE first: until enough sideways offset is built to clear the stall's width, aim to
+        // the side with only a small forward reach (a steep ~55° arc) so the car steps out of the lane
+        // BEFORE it draws level with the breakdown. Without this the arc is too shallow and the car
+        // clips the stall's rear corner — i.e. "runs straight into it". Once clear, aim forward along
+        // the corridor to slide past and rejoin.
+        bool laterallyClear = myLat > passOffset * 0.8f;
+        float lookAhead = laterallyClear ? 4f : 1.3f;
+        passPoint = stallPos + f * (myL + lookAhead) + passSide * passOffset;
         return true;
+    }
+
+    /// <summary>How far this car has swung toward its pass side, relative to the stalled car it is
+    /// passing (0 if not passing). Used to keep braking on the stall until we're clear of its width.</summary>
+    private float PassLateralOffset()
+    {
+        if (passingCar == null) return 0f;
+        return Mathf.Abs(Vector3.Dot(transform.position - passingCar.transform.position, passSide));
     }
 
     /// <summary>Try to start passing <paramref name="stalled"/>: pick a clear side (left first —
@@ -896,6 +932,11 @@ public class CarAI : MonoBehaviour
                              out CarAI nearestInLane))
                 continue;
 
+            // Reject if a car is closing on the target slot from behind — merging in front of it
+            // would cause a rear-end/side-swipe. This is the main cause of lane-change collisions.
+            if (!RearGapClear(candidate.transform.position))
+                continue;
+
             // Accept if the lane is empty, or its nearest car is faster than our blocker.
             if (nearestInLane == null || nearestInLane.CurrentSpeed > blockingCarSpeed)
             {
@@ -968,6 +1009,38 @@ public class CarAI : MonoBehaviour
         return clear;
     }
 
+    /// <summary>
+    /// True if no car is closing on the target lane-slot from behind (relative to my heading) within
+    /// <see cref="laneChangeRearGap"/>. A faster car in that rear zone would rear-end or side-swipe a
+    /// car that merges in front of it, so we hold the lane change until the gap is safe.
+    /// </summary>
+    private bool RearGapClear(Vector3 slot)
+    {
+        Vector3 back = -transform.forward;
+        // Scan a capsule-ish column just behind and beside the slot.
+        Collider[] hits = Physics.OverlapSphere(slot + back * (laneChangeRearGap * 0.5f),
+                                                laneChangeRearGap * 0.5f + laneChangeClearRadius,
+                                                carLayerMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < hits.Length; i++)
+        {
+            var h = hits[i];
+            if (h == null) continue;
+            if (h.transform == transform || h.transform.IsChildOf(transform)) continue;
+            var other = h.GetComponentInParent<CarAI>();
+            if (other == null) continue;
+
+            // Only cars actually behind the slot (in my travel direction) matter.
+            Vector3 toCar = h.transform.position - slot;
+            float behind = Vector3.Dot(toCar, back);
+            if (behind <= 0f) continue;            // it's ahead of the slot, not a rear threat
+            if (behind > laneChangeRearGap) continue;
+            // A car in the rear zone that's moving faster than me is the dangerous case; a slower
+            // one I can safely pull in front of.
+            if (other.CurrentSpeed >= currentSpeed - 0.5f) return false;
+        }
+        return true;
+    }
+
     public void Despawn(bool arrived = false)
     {
         if (arrived) TrafficSimulationManager.ReportArrival(Time.time - spawnTime);
@@ -982,6 +1055,18 @@ public class CarAI : MonoBehaviour
     {
         Stalled = true;
         stallTimer = Mathf.Max(0f, seconds);
+        // Freeze the car in place so a car queued behind can't out-push its brakes and bulldoze the
+        // broken-down car off the road. Kinematic = an immovable obstacle that others still collide
+        // with. Velocity is zeroed first so it doesn't carry momentum into the kinematic switch.
+        if (rb != null)
+        {
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+            // ContinuousDynamic isn't valid on kinematic bodies (Unity warns); Speculative works for both.
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+            rb.isKinematic = true;
+        }
+        currentSpeed = 0f;
     }
 
     /// <summary>Clear a breakdown so the car resumes driving.</summary>
@@ -990,6 +1075,11 @@ public class CarAI : MonoBehaviour
         Stalled = false;
         stallTimer = 0f;
         blockedTimer = 0f;
+        if (rb != null)
+        {
+            rb.isKinematic = false; // hand control back to the physics drive model
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        }
     }
 
     /// <summary>Toggle a breakdown on/off (used by click-to-stall). 0 seconds = indefinite.</summary>

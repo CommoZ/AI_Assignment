@@ -183,6 +183,8 @@ public class SimulationUI : MonoBehaviour
         limit = GUILayout.HorizontalSlider(limit, 0f, 25f);
         TrafficSimulationManager.GlobalSpeedLimit = limit < 0.5f ? 0f : limit; // snap low end to "off"
 
+        TrafficSimulationManager.SpawningEnabled = GUILayout.Toggle(
+            TrafficSimulationManager.SpawningEnabled, " Spawn new cars");
         GUILayout.Label($"Rush-hour demand: {TrafficSimulationManager.DemandMultiplier:0.00}x");
         TrafficSimulationManager.DemandMultiplier =
             GUILayout.HorizontalSlider(TrafficSimulationManager.DemandMultiplier, 0.25f, 4f);
@@ -203,7 +205,7 @@ public class SimulationUI : MonoBehaviour
         if (GUILayout.Button("Break down random car")) TrafficSimulationManager.StallRandomCar();
         if (GUILayout.Button("Clear all", GUILayout.Width(80))) TrafficSimulationManager.ClearAllStalls();
         GUILayout.EndHorizontal();
-        GUILayout.Label("Left-click a car to select it.");
+        GUILayout.Label("Left-click a car to select it. N = spawn a car at the cursor.");
 
         // ---- Spawn / Perfect / signals / city ----
         GUILayout.Space(6);
@@ -217,12 +219,12 @@ public class SimulationUI : MonoBehaviour
         }
 
         GUILayout.Space(6);
-        bool newPerfect = GUILayout.Toggle(perfectMode, " Perfect mode (perfect info, no lights)");
-        if (newPerfect != perfectMode)
-        {
-            perfectMode = newPerfect;
-            ApplyPerfectMode(perfectMode);
-        }
+        //bool newPerfect = GUILayout.Toggle(perfectMode, " Perfect mode (perfect info, no lights)");
+        //if (newPerfect != perfectMode)
+        //{
+        //    perfectMode = newPerfect;
+        //    ApplyPerfectMode(perfectMode);
+        //}
 
         SimulationGizmoSettings.ShowRoutes =
             GUILayout.Toggle(SimulationGizmoSettings.ShowRoutes, " Show GPS routes (gizmos)");

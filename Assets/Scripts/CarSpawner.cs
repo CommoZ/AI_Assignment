@@ -56,6 +56,11 @@ public class CarSpawner : MonoBehaviour
     // A drawn-but-not-yet-placed car, kept across blocked ticks so the draw order stays stable.
     private class PendingSpawn { public Waypoint origin, dest; public List<Waypoint> route; public DriverProfile profile; }
     private PendingSpawn pending;
+    private float pendingWait; // how long the queued draw has been blocked at its origin
+
+    // If a queued origin stays blocked this long (e.g. a broken-down car parked on a spawn port),
+    // discard the draw and pick a fresh origin — otherwise that one blocked port halts ALL spawning.
+    private const float PendingRedrawTimeout = 3f;
 
     // Cached demand geometry (centroid of spawnPoints + each port's 0..1 distance from it).
     private Vector3 demandCenter;
@@ -71,6 +76,7 @@ public class CarSpawner : MonoBehaviour
     private void Update()
     {
         if (carPrefab == null || spawnPoints.Count == 0) return;
+        if (!TrafficSimulationManager.SpawningEnabled) return; // master tap closed: timer frozen, no draws
         if (rng == null) rng = new System.Random(TrafficSimulationManager.Instance != null
                                                   ? TrafficSimulationManager.Instance.randomSeed : 0);
         EnsureCache();
@@ -85,10 +91,18 @@ public class CarSpawner : MonoBehaviour
         if (mgr != null && mgr.CarCount >= mgr.maxCars) return;
 
         // Draw the next car once; retry placement on later ticks if its origin is blocked.
-        if (pending == null) pending = DrawSpawn();
+        if (pending == null) { pending = DrawSpawn(); pendingWait = 0f; }
         if (pending == null) return;
 
-        if (IsBlockedByCar(pending.origin.transform.position)) return; // keep the draw, retry next tick
+        if (IsBlockedByCar(pending.origin.transform.position))
+        {
+            // Origin blocked. Normally a transient jam that clears in a tick or two, so we keep the
+            // same draw (stable order). But a broken-down car can block a port forever — so after a
+            // timeout, discard this draw and pick a fresh origin next tick instead of halting.
+            pendingWait += interval;
+            if (pendingWait > PendingRedrawTimeout) pending = null;
+            return;
+        }
         SpawnPending();
         pending = null;
     }
@@ -116,9 +130,43 @@ public class CarSpawner : MonoBehaviour
     /// <summary>Instantiate the queued car and wire up its route/profile.</summary>
     private void SpawnPending()
     {
-        Waypoint sp = pending.origin;
+        SpawnCar(pending.origin, pending.dest, pending.route, pending.profile, rng);
+    }
+
+    /// <summary>
+    /// Spawn one car right now at <paramref name="origin"/> (cursor-driven manual spawn).
+    /// Draws its destination/profile from <c>UnityEngine.Random</c>, NOT the seeded demand
+    /// stream — like breakdowns, manual spawns are ad-hoc interventions and must not shift
+    /// the reproducible draw order. Returns the car, or null if blocked / at the car cap.
+    /// </summary>
+    public CarAI SpawnManualAt(Waypoint origin)
+    {
+        if (carPrefab == null || origin == null) return null;
+        var mgr = TrafficSimulationManager.Instance;
+        if (mgr != null && mgr.CarCount >= mgr.maxCars) return null;
+        if (IsBlockedByCar(origin.transform.position)) return null;
+
+        Waypoint dest = null;
+        List<Waypoint> route = null;
+        if (assignDestinations && spawnPoints.Count > 1)
+        {
+            for (int i = 0; i < 8 && route == null; i++)
+            {
+                Waypoint w = spawnPoints[Random.Range(0, spawnPoints.Count)];
+                if (w == null || w == origin) continue;
+                var r = Pathfinder.FindPath(origin, w, TrafficSimulationManager.ActiveEdgeCost);
+                if (r != null && r.Count >= 2) { dest = w; route = r; }
+            }
+        }
+        DriverProfile profile = population != null ? population.PickWeighted() : null;
+        return SpawnCar(origin, dest, route, profile, null);
+    }
+
+    /// <summary>Shared instantiation: place, orient toward the first leg, wire route/profile.</summary>
+    private CarAI SpawnCar(Waypoint sp, Waypoint dest, List<Waypoint> route, DriverProfile profile, System.Random speedRng)
+    {
         Vector3 pos = sp.transform.position;
-        Waypoint next = pending.route != null ? pending.route[1] : sp.GetRandomNext();
+        Waypoint next = route != null ? route[1] : sp.GetRandomNext();
 
         Quaternion rot = sp.transform.rotation;
         if (next != null)
@@ -132,17 +180,18 @@ public class CarSpawner : MonoBehaviour
         car.currentTarget = next != null ? next : sp;
         car.originNode = sp;
 
-        if (pending.route != null)
+        if (route != null)
         {
-            car.route = pending.route;
-            car.destination = pending.dest;
+            car.route = route;
+            car.destination = dest;
         }
 
-        if (pending.profile != null)
+        if (profile != null)
         {
-            car.profile = pending.profile;
-            car.maxSpeed *= pending.profile.RollSpeedFactor(rng);
+            car.profile = profile;
+            car.maxSpeed *= speedRng != null ? profile.RollSpeedFactor(speedRng) : profile.RollSpeedFactor();
         }
+        return car;
     }
 
     // ---- Demand selection ----

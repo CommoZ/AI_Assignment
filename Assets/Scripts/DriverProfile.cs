@@ -123,8 +123,10 @@ public class DriverProfile : ScriptableObject
     /// <summary>How much slower (m/s) a car ahead must be before this driver wants to overtake. Lower = keener.</summary>
     public float OvertakeSpeedMargin(float frustration)
     {
-        if (isPerfect) return 1.5f;
-        return Mathf.Lerp(3.5f, 0.4f, EffectiveAggression(frustration));
+        if (isPerfect) return 3f;
+        // Even the most aggressive/frustrated driver needs a real speed deficit before overtaking,
+        // so cars don't hop lanes for a car that's barely slower.
+        return Mathf.Lerp(5f, 2f, EffectiveAggression(frustration));
     }
 
     /// <summary>Advance a car's frustration given whether it is currently blocked/stopped.</summary>

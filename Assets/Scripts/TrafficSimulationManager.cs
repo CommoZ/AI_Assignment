@@ -30,6 +30,8 @@ public class TrafficSimulationManager : MonoBehaviour
     public static float GlobalSpeedLimit = 0f;
     /// <summary>Spawn-rate multiplier (rush-hour surge). 1 = normal.</summary>
     public static float DemandMultiplier = 1f;
+    /// <summary>Master tap for scheduled spawning. False = no new cars (manual N-key spawns still work).</summary>
+    public static bool SpawningEnabled = true;
 
     // ---- Congestion-aware routing ----
     /// <summary>When true, cars route with <see cref="CongestionCost"/> so they avoid busy roads.</summary>
