@@ -204,6 +204,17 @@ public class CarSelectionController : MonoBehaviour
     {
         if (routeLine == null) return;
 
+        // "Show GPS routes" toggle governs the visible route line + beacon, not just the Scene gizmo.
+        if (!SimulationGizmoSettings.ShowRoutes)
+        {
+            routeLine.positionCount = 0;
+            routeLineBack.positionCount = 0;
+            if (destMarker != null && destMarker.gameObject.activeSelf)
+                destMarker.gameObject.SetActive(false);
+            growFor = null; // so re-enabling re-animates the reveal from scratch
+            return;
+        }
+
         // Destination beacon: shown whenever the selected car has a GPS destination.
         Waypoint dest = Selected != null ? Selected.destination : null;
         if (destMarker != null)

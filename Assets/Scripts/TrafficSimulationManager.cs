@@ -178,6 +178,13 @@ public class TrafficSimulationManager : MonoBehaviour
     {
         // Seed the shared RNG so the run's demand + driver rolls are reproducible for a given seed.
         Random.InitState(randomSeed);
+
+        // The Pathfinder cache and metric statics survive SceneManager.LoadScene (no domain reload),
+        // so entering a new scene must drop them — otherwise a returned-to scene with the same node
+        // count reuses the previous scene's reverse-adjacency map (keyed by now-destroyed waypoints),
+        // FindPath returns null for every route, and destination-routed scenes stop spawning entirely.
+        Pathfinder.InvalidateCache();
+        ResetMetrics(); // fresh run: clears congestion (stale destroyed-node keys), samples, trips, collisions
     }
 
     private void Update()

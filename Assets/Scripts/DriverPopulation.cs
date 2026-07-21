@@ -27,6 +27,14 @@ public class DriverPopulation : ScriptableObject
     [Tooltip("If set, PickWeighted always returns this profile, ignoring the weighted mix. Used for a control run.")]
     public DriverProfile globalOverride;
 
+    /// <summary>
+    /// Runtime-only override (Perfect mode), separate from the serialized <see cref="globalOverride"/>.
+    /// The UI must set THIS, not the asset field: it is NonSerialized, so it never persists onto the
+    /// shared asset and always resets to null on a domain reload — a Perfect-mode toggle can no longer
+    /// leak into later runs/scenes and force every car to the perfect profile.
+    /// </summary>
+    [System.NonSerialized] public DriverProfile runtimeOverride;
+
     [Tooltip("The 'perfect driver' archetype, referenced by the Perfect-mode toggle so the UI can flip the whole population to the control baseline.")]
     public DriverProfile perfectProfile;
 
@@ -39,7 +47,8 @@ public class DriverPopulation : ScriptableObject
     /// </summary>
     public DriverProfile PickWeighted(System.Random rng)
     {
-        if (globalOverride != null) return globalOverride;
+        DriverProfile ov = runtimeOverride != null ? runtimeOverride : globalOverride;
+        if (ov != null) return ov;
         if (entries == null || entries.Count == 0) return null;
 
         float total = 0f;

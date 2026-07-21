@@ -34,6 +34,7 @@ public class SimulationUI : MonoBehaviour
     private float greenTime = 6f;
     private bool perfectMode;
 
+    private SimulationGizmoSettings gizmo; // drives the "Show GPS routes" toggle's persisted value
     private CityGridBuilder city;   // present only in the city scene
     private int gridRows = 4;
     private int gridCols = 4;
@@ -62,6 +63,8 @@ public class SimulationUI : MonoBehaviour
         var cities = FindObjectsByType<CityGridBuilder>(FindObjectsSortMode.None);
         city = cities.Length > 0 ? cities[0] : null;
         if (city != null) { gridRows = city.rows; gridCols = city.cols; }
+
+        gizmo = FindFirstObjectByType<SimulationGizmoSettings>();
 
         var mgr = TrafficSimulationManager.Instance;
         if (mgr != null) seedText = mgr.randomSeed.ToString();
@@ -226,8 +229,11 @@ public class SimulationUI : MonoBehaviour
         //    ApplyPerfectMode(perfectMode);
         //}
 
-        SimulationGizmoSettings.ShowRoutes =
-            GUILayout.Toggle(SimulationGizmoSettings.ShowRoutes, " Show GPS routes (gizmos)");
+        // Drive the component's instance field (its ExecuteAlways Update mirrors it back into the
+        // static every frame, so setting only the static wouldn't stick).
+        bool showRoutes = GUILayout.Toggle(SimulationGizmoSettings.ShowRoutes, " Show GPS routes");
+        SimulationGizmoSettings.ShowRoutes = showRoutes;
+        if (gizmo != null) gizmo.showRoutes = showRoutes;
 
         if (signals != null && signals.Length > 0)
         {
@@ -346,7 +352,9 @@ public class SimulationUI : MonoBehaviour
             {
                 if (s == null || s.population == null) continue;
                 pop = s.population;
-                s.population.globalOverride = on ? s.population.perfectProfile : null;
+                // Runtime-only override: never write to the serialized asset (see DriverPopulation),
+                // so toggling Perfect mode can't leak into later runs/scenes.
+                s.population.runtimeOverride = on ? s.population.perfectProfile : null;
             }
         if (pop == null) return;
 
